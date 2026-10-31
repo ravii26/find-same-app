@@ -1,0 +1,58 @@
+# Runtime dependencies — mirrors [project].dependencies in pyproject.toml (Python >=3.12)
+
+# Web framework
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+
+# Validation
+pydantic==2.10.3
+pydantic-settings==2.6.1
+
+# Task queue
+dramatiq[redis]==2.2.1
+redis==8.1.0
+hiredis==3.1.0
+
+# HTTP client
+httpx==0.28.1
+
+# HTML parsing (Lexbor backend)
+selectolax==1.0.1
+
+# Fuzzy matching
+rapidfuzz==3.14.6
+
+# Jaro-Winkler / Levenshtein for domain lookalike detection
+jellyfish>=1.0.0
+
+# Perceptual hash for icon similarity comparison
+imagehash>=4.3.0
+Pillow>=10.0.0
+
+# Google Play Store scraper
+google-play-scraper>=1.2.0
+
+# Domain / URL tools
+tldextract==5.1.3
+
+# ULID
+python-ulid==4.0.1
+
+# File utilities
+filelock==3.16.1
+
+# Charset detection
+chardet==5.2.0
+
+# Elasticsearch mirror of scan results
+elasticsearch[async]>=8.15,<9
+
+# YAML config
+pyyaml==6.0.2
+
+# Security
+cryptography==44.0.0
+
+# Browser automation (HappyMod, Samsung, Uptodown and other Playwright adapters)
+# After install, run: playwright install chromium
+playwright==1.49.0

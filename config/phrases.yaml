@@ -1,0 +1,150 @@
+# config/phrases.yaml
+# Search and scoring phrases, per market.
+#
+# default applies to every scan (English). A *pack* adds words in another language; packs are switched
+# on by the request's countries through the markets table (country code -> packs). Scoring uses the
+# words of ALL packs, whatever the request's countries, because a rogue listing can be in any language.
+#
+#   lure_suffixes  appended to the brand to make search keywords ("<brand> <suffix>")
+#   lure_words     words in an app/page title that suggest a mod/cracked/free distribution (scoring)
+#   scam_words     banking/payment scam vocabulary next to a brand match (scoring)
+#   search_queries Bing queries, "{brand}" is replaced by the brand name
+#
+# Add a language by adding a pack and listing its countries under markets. No code change is needed.
+
+default:
+  lure_suffixes:
+    - apk
+    - mod apk
+    - premium apk
+    - pro
+    - lite
+    - latest version
+    - free download
+    - old version
+    - cracked
+    - unlocked
+    - for pc
+    - hack
+    - cheats
+  lure_words: [mod, cracked, premium, free, hack, cheat, cheats, unlocked, pro, lite]
+  scam_words:
+    - reward
+    - rewards
+    - point
+    - points
+    - kyc
+    - update
+    - updated
+    - updates
+    - verify
+    - verification
+    - refund
+    - cashback
+    - bonus
+    - offer
+    - offers
+    - loan
+    - card
+    - claim
+    - login
+    - secure
+    - account
+    - block
+    - blocked
+    - limit
+    - expire
+    - expired
+    - expires
+    - expiry
+    - expiring
+    - expiration
+    - pan
+    - aadhaar
+    - aadhar
+  search_queries:
+    - "{brand} apk"
+    - "{brand} apk download"
+
+packs:
+  hinglish:            # Hindi/Urdu written in Latin letters (India, Pakistan)
+    lure_suffixes: [download kare, free recharge, loan app, earning app, paisa kamao, mod apk download]
+    lure_words: [kare, kamao, inaam, lottery]
+    scam_words: [paisa, inaam, recharge, customer care, khata, band]
+    search_queries: ["{brand} download kare", "{brand} free recharge apk"]
+
+  russian:
+    lure_suffixes: [скачать, скачать apk, мод, взлом, последняя версия, бесплатно, без рекламы]
+    lure_words: [скачать, мод, взлом, бесплатно, premium, крякнутый]
+    scam_words: [бонус, выигрыш, подтвердить, обновление, заблокирован, вход, кэшбэк, кредит, займ, возврат]
+    search_queries: ["{brand} скачать apk", "{brand} мод apk"]
+
+  portuguese:
+    lure_suffixes: [baixar, baixar apk, grátis, atualizado, versão antiga, hackeado, dinheiro infinito]
+    lure_words: [baixar, grátis, hackeado, atualizado, infinito]
+    scam_words: [bônus, prêmio, verificar, atualizar, bloqueado, entrar, reembolso, empréstimo]
+    search_queries: ["{brand} baixar apk", "{brand} apk grátis"]
+
+  spanish:
+    lure_suffixes: [descargar, descargar apk, gratis, hackeado, última versión, versión antigua, premium gratis]
+    lure_words: [descargar, gratis, hackeado, premium]
+    scam_words: [bono, premio, verificar, actualizar, bloqueado, iniciar sesión, reembolso, préstamo]
+    search_queries: ["{brand} descargar apk", "{brand} apk gratis"]
+
+  indonesian:
+    lure_suffixes: [unduh, unduh apk, gratis, mod apk, versi terbaru, pinjaman, hadiah]
+    lure_words: [unduh, gratis, hadiah, pinjaman]
+    scam_words: [bonus, hadiah, verifikasi, pembaruan, diblokir, masuk, pinjaman, pencairan]
+    search_queries: ["{brand} unduh apk", "{brand} apk gratis"]
+
+  malay:
+    lure_suffixes: [muat turun, muat turun apk, percuma, mod apk, versi terkini, pinjaman, hadiah]
+    lure_words: [muat turun, percuma, hadiah, pinjaman]
+    scam_words: [bonus, hadiah, pengesahan, kemas kini, disekat, log masuk, bayaran balik, pinjaman, akaun dibekukan]
+    search_queries: ["{brand} muat turun apk", "{brand} apk percuma"]
+
+  montenegrin:         # Montenegrin/Serbian/Bosnian/Croatian, Latin script (Montenegro)
+    lure_suffixes: [preuzmi, preuzmi apk, besplatno, hakovan, mod apk, najnovija verzija, kredit, nagrada]
+    lure_words: [preuzmi, besplatno, hakovan, nagrada, kredit]
+    scam_words: [bonus, nagrada, potvrda, ažuriranje, blokiran, prijava, povrat novca, kredit, zamrznut račun]
+    search_queries: ["{brand} preuzmi apk", "{brand} apk besplatno"]
+
+  arabic:
+    lure_suffixes: [تحميل, تنزيل, مهكر, مجانا, اخر اصدار]
+    lure_words: [تحميل, تنزيل, مهكر, مجانا]
+    scam_words: [مكافأة, تحقق, تحديث, محظور, تسجيل الدخول, استرداد, قرض]
+    search_queries: ["تحميل {brand} apk", "{brand} مهكر"]
+
+  turkish:
+    lure_suffixes: [indir, apk indir, hileli, ücretsiz, son sürüm]
+    lure_words: [indir, hileli, ücretsiz]
+    scam_words: [bonus, ödül, doğrula, güncelle, engellendi, giriş, iade, kredi]
+    search_queries: ["{brand} apk indir", "{brand} hileli apk"]
+
+# country code (ISO 3166-1 alpha-2) -> packs
+markets:
+  IN: [hinglish]
+  PK: [hinglish]
+  RU: [russian]
+  BY: [russian]
+  KZ: [russian]
+  BR: [portuguese]
+  PT: [portuguese]
+  ES: [spanish]
+  MX: [spanish]
+  AR: [spanish]
+  CO: [spanish]
+  CL: [spanish]
+  PE: [spanish]
+  ID: [indonesian]
+  MY: [malay]
+  ME: [montenegrin]
+  SA: [arabic]
+  AE: [arabic]
+  EG: [arabic]
+  MA: [arabic]
+  DZ: [arabic]
+  IQ: [arabic]
+  KW: [arabic]
+  QA: [arabic]
+  TR: [turkish]

@@ -1,0 +1,197 @@
+[
+  {
+    "brand_name": "PhonePe",
+    "official_domain": "phonepe.com",
+    "official_publishers": [
+      "PhonePe Private Limited",
+      "PhonePe"
+    ],
+    "allowlist_packages": [
+      "com.phonepe.app.business",
+      "com.phonepe.stockbroking"
+    ],
+    "android_packages": [
+      "com.phonepe.app"
+    ],
+    "ios_bundles": [
+      "com.phonepe.PhonePeApp"
+    ]
+  },
+  {
+    "brand_name": "Paytm",
+    "official_domain": "paytm.com",
+    "official_publishers": [
+      "One97 Communications Limited",
+      "One97 Communications",
+      "PayTM Mobile Solutions Private Limited",
+      "Paytm - One97 Communications Ltd."
+    ],
+    "allowlist_packages": [
+      "net.one97.paytm",
+      "com.paytm.mall",
+      "com.paytmmoney.wealth",
+      "net.one97.travel",
+      "com.one97.paytmmoney",
+      "com.paytmmoney"
+    ],
+    "android_packages": [
+      "net.one97.paytm"
+    ],
+    "ios_bundles": [
+      "com.one97.paytm"
+    ]
+  },
+  {
+    "brand_name": "Google Pay",
+    "official_domain": "pay.google.com",
+    "official_publishers": [
+      "Google LLC"
+    ],
+    "allowlist_packages": [
+      "com.google.android.apps.nbu.paisa.merchant"
+    ],
+    "android_packages": [
+      "com.google.android.apps.nbu.paisa.user"
+    ]
+  },
+  {
+    "brand_name": "HDFC Bank",
+    "official_domain": "hdfcbank.com",
+    "official_publishers": [
+      "HDFC Bank Limited",
+      "HDFC Bank"
+    ],
+    "allowlist_packages": [
+      "com.vyapar.hdfc",
+      "com.app.hdfc"
+    ],
+    "android_packages": [
+      "com.snapwork.hdfc"
+    ]
+  },
+  {
+    "brand_name": "YONO SBI",
+    "official_domain": "onlinesbi.sbi",
+    "official_publishers": [
+      "State Bank of India",
+      "SBI"
+    ],
+    "android_packages": [
+      "com.sbi.SBIFreedomPlus"
+    ]
+  },
+  {
+    "brand_name": "ICICI Bank iMobile",
+    "official_domain": "icicibank.com",
+    "official_publishers": [
+      "ICICI Bank Limited",
+      "ICICI Bank"
+    ],
+    "android_packages": [
+      "com.csam.icici.bank.imobile"
+    ]
+  },
+  {
+    "brand_name": "Flipkart",
+    "official_domain": "flipkart.com",
+    "official_publishers": [
+      "Flipkart Internet Private Limited",
+      "Flipkart"
+    ],
+    "allowlist_packages": [
+      "com.flipkart.android",
+      "com.myntra.android"
+    ],
+    "android_packages": [
+      "com.flipkart.android"
+    ]
+  },
+  {
+    "brand_name": "Amazon India",
+    "official_domain": "amazon.in",
+    "official_publishers": [
+      "Amazon Mobile LLC",
+      "AMZN Mobile LLC"
+    ],
+    "android_packages": [
+      "in.amazon.mShop.android.shopping"
+    ]
+  },
+  {
+    "brand_name": "Swiggy",
+    "official_domain": "swiggy.com",
+    "official_publishers": [
+      "Bundl Technologies Pvt Ltd",
+      "Swiggy"
+    ],
+    "android_packages": [
+      "in.swiggy.android"
+    ]
+  },
+  {
+    "brand_name": "Zomato",
+    "official_domain": "zomato.com",
+    "official_publishers": [
+      "Zomato Ltd",
+      "Zomato Limited"
+    ],
+    "android_packages": [
+      "com.application.zomato"
+    ]
+  },
+  {
+    "brand_name": "CRED",
+    "official_domain": "cred.club",
+    "official_publishers": [
+      "DreamPlug Technologies Private Limited",
+      "CRED"
+    ],
+    "android_packages": [
+      "com.dreamplug.androidapp"
+    ]
+  },
+  {
+    "brand_name": "Groww",
+    "official_domain": "groww.in",
+    "official_publishers": [
+      "Nextbillion Technology Pvt Ltd",
+      "Groww"
+    ],
+    "android_packages": [
+      "com.nextbillion.groww"
+    ]
+  },
+  {
+    "brand_name": "Meesho",
+    "official_domain": "meesho.com",
+    "official_publishers": [
+      "Fashnear Technologies Private Limited",
+      "Meesho"
+    ],
+    "android_packages": [
+      "com.meesho.supply"
+    ]
+  },
+  {
+    "brand_name": "BHIM UPI",
+    "official_domain": "bhimupi.org.in",
+    "official_publishers": [
+      "National Payments Corporation of India",
+      "NPCI"
+    ],
+    "android_packages": [
+      "in.org.npci.upiapp"
+    ]
+  },
+  {
+    "brand_name": "Bajaj Finserv",
+    "official_domain": "bajajfinserv.in",
+    "official_publishers": [
+      "Bajaj Finance Limited",
+      "Bajaj Finserv"
+    ],
+    "android_packages": [
+      "org.altruist.BajajExperia"
+    ]
+  }
+]
