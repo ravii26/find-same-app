@@ -41,6 +41,5 @@ def sample_request() -> dict:
         "ios_bundles": ["com.petpooja.billing"],
         "official_domain": "petpooja.com",
         "keywords": ["petpooja", "billing", "restaurant"],
-        "analyze_apks": False,
         "depth": 2,
     }

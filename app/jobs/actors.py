@@ -78,9 +78,11 @@ async def _run_discovery(brand_id: str) -> None:
     record["status"] = "running"
     brand_store.save(record)
     try:
+        # Records made before the link lists existed hold one link under the singular key
+        play_urls = payload.get("play_store_urls") or [u for u in [payload.get("play_store_url")] if u]
+        app_urls = payload.get("app_store_urls") or [u for u in [payload.get("app_store_url")] if u]
         result = await discovery.discover(
-            payload.get("play_store_url"), payload.get("app_store_url"), payload["brand_name"], payload.get("aliases", []),
-            payload.get("country", "in"),
+            play_urls, app_urls, payload["brand_name"], payload.get("aliases", []), payload.get("country", "in"),
         )
         brand_store.set_candidates(record, result)
         log.info("discovery: brand %s found %d candidates", brand_id, len(result["candidates"]))
@@ -131,6 +133,18 @@ def _indexing_problem(indexed: dict | None) -> str | None:
 
 
 
+async def _remember_official_apps(scan_id: str, report, request: ScanRequest, log_path) -> None:
+    """Keep the brand's own apps this scan allowlisted on the brand record, so later scans allowlist them too."""
+    from app.storage import brand_index
+    try:
+        apps = brand_index.official_from_report(report, request)
+        if apps:
+            await brand_index.record_allowlist(request.brand_id, apps)
+        scan_log.append_sync(log_path, scan_id, "INFO", f"brand allowlist: {len(apps)} official app(s) kept")
+    except Exception as exc:  # the scan's report is already written; the brand record is only updated
+        scan_log.append_sync(log_path, scan_id, "WARN", f"brand allowlist not updated: {exc}")
+
+
 async def _execute_scan(scan_id: str, request_dict: dict) -> None:
     settings = get_settings()
     redis = _make_redis()
@@ -156,6 +170,9 @@ async def _execute_scan(scan_id: str, request_dict: dict) -> None:
         scan_log.append_sync(
             log_path, scan_id, "INFO", f"scan finished — status={final.value} results={report.summary.total_results}"
         )
+
+        if request.brand_id:
+            await _remember_official_apps(scan_id, report, request, log_path)
 
         from app.storage import es_store
         indexed = await es_store.index_report(report, request, final.value)  # always runs; never raises

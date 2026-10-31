@@ -21,6 +21,8 @@ from typing import Any
 from app.api.models import ScanRequest
 from app.config.settings import get_settings
 
+# Who confirmed an app that came from the customer's own link (no separate step needed)
+LINK_CONFIRMER = "customer link"
 _ID_RE = re.compile(r"^brd_[0-9A-HJKMNP-TV-Z]{26}$")  # ULID with a brd_ prefix
 
 
@@ -76,13 +78,25 @@ def create(brand_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     return record
 
 
+def _confirmed_item(cand: dict[str, Any], confirmed_by: str, now: str, linked: bool = False) -> dict[str, Any]:
+    return {
+        "store": cand["store"], "id": cand["id"], "name": cand["name"], "publisher": cand["publisher"],
+        "confirmed_by": confirmed_by, "confirmed_at": now, "linked": linked,
+    }
+
+
 def set_candidates(record: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    """Store the candidates. The apps behind the customer's own links are confirmed at once: the customer gave them."""
+    now = _now()
+    linked = [_confirmed_item(c, LINK_CONFIRMER, now, linked=True) for c in result["candidates"] if c.get("linked")]
     record.update(
         status="done",
         candidates=result["candidates"],
         play_developer=result.get("play_developer"),
         notes=result.get("notes", []),
         error=None,
+        confirmed=linked,
+        confirmed_at=now if linked else None,
     )
     save(record)
     return record
@@ -95,20 +109,21 @@ def set_failed(record: dict[str, Any], error: str) -> dict[str, Any]:
 
 
 def confirm(record: dict[str, Any], selected: list[dict[str, str]], confirmed_by: str) -> dict[str, Any]:
-    """Replace the confirmed set with the selected candidates. Each selection must be a known candidate."""
+    """Confirm the selected candidates, on top of the apps behind the customer's links, which stay confirmed.
+
+    Each selection must be a known candidate. Confirming again adds to the confirmed set; it does not replace it,
+    so a linked app cannot be dropped by leaving it out of the selection.
+    """
     known = {(c["store"], c["id"]): c for c in record["candidates"]}
     now = _now()
-    items: list[dict[str, Any]] = []
+    items: dict[tuple[str, str], dict[str, Any]] = {(i["store"], i["id"]): i for i in record.get("confirmed", [])}
     for sel in selected:
         key = (sel["store"], sel["id"])
         cand = known.get(key)
         if cand is None:
             raise ValueError(f"{sel['store']} id {sel['id']} is not in the candidate list")
-        items.append({
-            "store": cand["store"], "id": cand["id"], "name": cand["name"], "publisher": cand["publisher"],
-            "confirmed_by": confirmed_by, "confirmed_at": now,
-        })
-    record.update(confirmed=items, confirmed_at=now)
+        items.setdefault(key, _confirmed_item(cand, confirmed_by, now))
+    record.update(confirmed=list(items.values()), confirmed_at=now)
     save(record)
     return record
 

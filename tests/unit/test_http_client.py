@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
+from app.utils import http_client
 from app.utils.http_client import (
     BlockedError,
     FetchError,
@@ -44,13 +45,15 @@ async def test_fetch_ssrf_blocked():
         await fetch("http://169.254.169.254/latest/meta-data")
 
 
-def _make_stream_cm(mock_resp):
-    """Return an async context manager that yields mock_resp."""
+def _make_stream_cm(*replies):
+    """Return a stream() stand-in that yields the replies in order; the last one repeats."""
     from contextlib import asynccontextmanager
 
+    queue = list(replies)
+
     @asynccontextmanager
-    async def _stream(method, url, headers=None):
-        yield mock_resp
+    async def _stream(method, url, **kwargs):
+        yield queue.pop(0) if len(queue) > 1 else queue[0]
 
     return _stream
 
@@ -81,7 +84,7 @@ async def test_fetch_403_raises_blocked():
         mock_get_client.return_value = mock_client
 
         with pytest.raises(BlockedError):
-            await fetch("https://example.com/page")
+            await fetch("https://example.com/page", retries=0)
 
 
 @pytest.mark.asyncio
@@ -95,7 +98,77 @@ async def test_fetch_429_raises_blocked():
         mock_get_client.return_value = mock_client
 
         with pytest.raises(BlockedError):
-            await fetch("https://example.com/page")
+            await fetch("https://example.com/page", retries=0)
+
+
+@pytest.mark.asyncio
+async def test_fetch_403_then_200_is_retried():
+    blocked = _fake_stream_resp(403)
+    ok = _fake_stream_resp(200, b"<html>content</html>")
+
+    with patch("app.utils.http_client.check_url"), \
+         patch("app.utils.http_client.get_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.stream = _make_stream_cm(blocked, ok)
+        mock_get_client.return_value = mock_client
+
+        resp = await fetch("https://example.com/page", backoff_base=0.0)
+        assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_fetch_403_persisting_raises_after_all_attempts():
+    blocked = _fake_stream_resp(403)
+    stream = _make_stream_cm(blocked)
+    calls = []
+
+    def counting_stream(method, url, **kwargs):
+        calls.append(url)
+        return stream(method, url, **kwargs)
+
+    with patch("app.utils.http_client.check_url"), \
+         patch("app.utils.http_client.get_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.stream = counting_stream
+        mock_get_client.return_value = mock_client
+
+        with pytest.raises(BlockedError, match="HTTP 403"):
+            await fetch("https://example.com/page", retries=2, backoff_base=0.0)
+    assert len(calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_request_slot_is_released_after_a_blocked_reply():
+    import threading
+
+    slots = threading.Semaphore(1)
+    blocked = _fake_stream_resp(403)
+
+    with patch("app.utils.http_client.check_url"), \
+         patch("app.utils.http_client._slots", slots), \
+         patch("app.utils.http_client.get_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.stream = _make_stream_cm(blocked)
+        mock_get_client.return_value = mock_client
+
+        with pytest.raises(BlockedError):
+            await fetch("https://example.com/page", retries=0)
+    assert slots.acquire(blocking=False)
+
+
+@pytest.mark.asyncio
+async def test_acquire_slot_waits_until_a_request_finishes():
+    import asyncio
+    import threading
+
+    slots = threading.Semaphore(1)
+    with patch("app.utils.http_client._slots", slots):
+        slots.acquire()  # every slot is taken, as if another scan is mid-request
+        waiter = asyncio.create_task(http_client._acquire_slot())
+        await asyncio.sleep(0.1)
+        assert not waiter.done()
+        slots.release()
+        await asyncio.wait_for(waiter, timeout=2)
 
 
 @pytest.mark.asyncio
@@ -162,3 +235,30 @@ async def test_close_client():
     await get_client()
     await close_client()
     assert hc._client is None
+
+
+def test_call_with_backoff_retries_a_blocked_library_call(monkeypatch):
+    monkeypatch.setattr(http_client.time, "sleep", lambda seconds: None)
+    attempts = []
+
+    def library_call():
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise RuntimeError("App not found. Status code 429 returned.")
+        return "ok"
+
+    assert http_client.call_with_backoff(library_call) == "ok"
+    assert len(attempts) == 3
+
+
+def test_call_with_backoff_raises_other_errors_at_once(monkeypatch):
+    monkeypatch.setattr(http_client.time, "sleep", lambda seconds: None)
+    attempts = []
+
+    def library_call():
+        attempts.append(1)
+        raise ValueError("not a block")
+
+    with pytest.raises(ValueError):
+        http_client.call_with_backoff(library_call)
+    assert len(attempts) == 1

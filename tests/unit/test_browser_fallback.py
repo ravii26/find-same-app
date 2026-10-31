@@ -126,11 +126,11 @@ async def test_429_exhausted_raises_blocked(monkeypatch, no_network):
     assert client.calls == 2
 
 
-async def test_403_is_not_retried(monkeypatch, no_network):
-    client = _use_client(monkeypatch, [_FakeResponse(403)])
+async def test_403_is_retried_then_blocked(monkeypatch, no_network):
+    client = _use_client(monkeypatch, [_FakeResponse(403), _FakeResponse(403)])
     with pytest.raises(BlockedError, match="HTTP 403"):
-        await http_client.fetch("https://example.com/", retries=2)
-    assert client.calls == 1
+        await http_client.fetch("https://example.com/", retries=1, backoff_base=0.0)
+    assert client.calls == 2
 
 
 def test_retry_after_parses_seconds_only():

@@ -214,7 +214,6 @@ def test_create_scan_full_body(client):
         "ios_bundles": ["com.petpooja.billing"],
         "official_domain": "petpooja.com",
         "keywords": ["petpooja", "billing"],
-        "analyze_apks": False,
         "depth": 2,
         "callback_url": "https://webhook.example.com/notify",
     }

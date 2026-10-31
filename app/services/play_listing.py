@@ -1,49 +1,22 @@
-# app/analysis/apk_similarity.py
-"""APK permission similarity — ported from stages/s8_sort.py and stages/s0_discovery.py.
+# app/services/play_listing.py
+"""Google Play listing facts used by scoring: who publishes an app, and which permissions its listing shows.
 
-Two signals:
-  1. Excess dangerous permissions — permissions the candidate requests that the
-     official app does NOT, filtered to those matching known dangerous categories
-     (SMS, contacts, camera, microphone, accessibility, etc.).
-  2. Permission Jaccard — overall overlap between the two sets.
-
-Official permissions are fetched automatically from Google Play using
-google_play_scraper.permissions() — no APK upload required.
+Both come from google_play_scraper, so no APK is downloaded. The blocking calls run in a worker thread through
+call_with_backoff, which shares the request limit and backoff with the rest of the scanner.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
-
-def jaccard(a: set, b: set) -> float:
-    if not a and not b:
-        return 1.0
-    union = a | b
-    return len(a & b) / len(union) if union else 0.0
+from app.utils.http_client import call_with_backoff
 
 log = logging.getLogger(__name__)
 
-_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="perm_sim")
-
-# Dangerous permission categories — substring match on human-readable Play Store labels
-_DANGEROUS_KEYWORDS: list[tuple[str, ...]] = [
-    ("sms", "text message", "receive messages"),
-    ("contacts",),
-    ("call log",),
-    ("record audio",),
-    ("take pictures", "camera"),
-    ("accessibility",),
-    ("install", "install apps"),
-    ("biometric", "fingerprint"),
-    ("precise location", "gps"),
-]
-
-
-# Manifest permission constants (as read from a real APK) that are high-risk for
-# a lookalike to request beyond the official app. Short names, no android.permission. prefix.
+# Manifest permission constants that are high-risk for a lookalike to request beyond the official app.
+# Short names, no android.permission. prefix.
 ANDROID_DANGEROUS: frozenset[str] = frozenset({
     "READ_SMS", "RECEIVE_SMS", "SEND_SMS", "READ_CONTACTS", "READ_CALL_LOG",
     "RECORD_AUDIO", "CAMERA", "BIND_ACCESSIBILITY_SERVICE", "REQUEST_INSTALL_PACKAGES",
@@ -58,7 +31,7 @@ def _short(perm: str) -> str:
 
 
 def android_excess_dangerous(official: list[str], candidate: list[str]) -> list[str]:
-    """Dangerous manifest permissions the candidate requests that the official APK does not."""
+    """Dangerous permissions the candidate requests that the official app does not."""
     official_short = {_short(p) for p in official}
     return sorted({
         p for p in candidate
@@ -69,12 +42,9 @@ def android_excess_dangerous(official: list[str], candidate: list[str]) -> list[
 def android_permission_jaccard(official: list[str], candidate: list[str]) -> float:
     if not official:
         return 0.0
-    return round(jaccard({_short(p) for p in official}, {_short(p) for p in candidate}), 3)
-
-
-def _is_dangerous(perm: str) -> bool:
-    p = perm.lower()
-    return any(any(kw in p for kw in group) for group in _DANGEROUS_KEYWORDS)
+    a = {_short(p) for p in official}
+    b = {_short(p) for p in candidate}
+    return round(len(a & b) / len(a | b), 3)
 
 
 def _normalise(perm_data: dict | list) -> list[str]:
@@ -97,13 +67,11 @@ def _normalise(perm_data: dict | list) -> list[str]:
     return sorted(out)
 
 
-# ── Fetch helpers ──────────────────────────────────────────────────────────────
-
 def _fetch_permissions_sync(package_id: str) -> list[str]:
-    """Blocking — run in thread pool. Uses google_play_scraper.permissions()."""
+    """Blocking. The permissions the package's Google Play listing shows."""
     try:
         from google_play_scraper import permissions as gps_perms
-        data = gps_perms(package_id, lang="en")
+        data = call_with_backoff(partial(gps_perms, package_id, lang="en"))
         return _normalise(data)
     except Exception as exc:
         # A package that is not on Google Play (third-party/sideloaded apps) is expected: the library then
@@ -114,10 +82,10 @@ def _fetch_permissions_sync(package_id: str) -> list[str]:
 
 
 def _fetch_developer_sync(package_id: str, country: str = "us") -> str | None:
-    """Blocking — run in thread pool. The developer name on the package's own Google Play listing."""
+    """Blocking. The developer name on the package's Google Play listing."""
     try:
         from google_play_scraper import app as gps_app
-        info = gps_app(package_id, lang="en", country=country)
+        info = call_with_backoff(partial(gps_app, package_id, lang="en", country=country))
         name = (info or {}).get("developer")
         return (name.strip() or None) if isinstance(name, str) else None
     except Exception as exc:
@@ -126,14 +94,9 @@ def _fetch_developer_sync(package_id: str, country: str = "us") -> str | None:
         return None
 
 
-async def fetch_developer(package_id: str) -> str | None:
-    """Async wrapper — the official developer name read from the brand's own Play listing."""
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_executor, _fetch_developer_sync, package_id)
-
-
 async def fetch_permissions(package_id: str) -> list[str]:
-    """Async wrapper — fetch Play Store permissions for a package."""
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_executor, _fetch_permissions_sync, package_id)
+    return await asyncio.to_thread(_fetch_permissions_sync, package_id)
 
+
+async def fetch_developer(package_id: str) -> str | None:
+    return await asyncio.to_thread(_fetch_developer_sync, package_id)

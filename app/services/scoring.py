@@ -19,7 +19,6 @@ from typing import Any
 
 import yaml
 from rapidfuzz import fuzz
-from rapidfuzz.distance import Levenshtein
 
 from app.api.models import Hit, ScanRequest
 from app.config.phrases import word_regex
@@ -256,134 +255,6 @@ def _score_one(
     return final, reasons
 
 
-def _brand_absent(hit: Hit, request: ScanRequest) -> bool:
-    brands = [request.brand_name, *request.brand_aliases]
-    return presence_any(brands, hit.app_name or hit.title, hit.package_id, hit.publisher) is None
-
-
-_PKG_VARIANT_MIN_SIM = 0.8
-
-
-def _is_package_variant(pkg: str, official: str) -> bool:
-    """A variant of the official id: the same id extended (com.x.app.pro), or a small edit of it."""
-    a, b = pkg.lower(), official.lower()
-    if a == b or a.startswith(b + ".") or b.startswith(a + "."):
-        return True
-    return Levenshtein.normalized_similarity(a, b) >= _PKG_VARIANT_MIN_SIM
-
-
-_CERT_REASON = "signing certificate differs from official app despite similar package ID"
-_UNRELATED_REASON = (
-    "APK content never references the brand or its domain — likely an unrelated app with a similar name"
-)
-
-
-def brand_referenced(hit: Hit, request: ScanRequest) -> bool | None:
-    """Does the analyzed APK itself reference the brand? None when it was not (fully) analyzed.
-
-    Evidence of reference: the exact brand in the app label, package or embedded URLs, or any
-    embedded URL on the official domain. A fuzzy lookalike name alone does not count — that is
-    exactly what an unrelated app with a similar name has.
-    """
-    a = hit.apk_analysis
-    if not a or not (a.package_name or a.app_label or a.embedded_urls):
-        return None
-    brand = request.brand_name
-    if any(exact_in(brand, f) for f in (a.app_label, a.package_name) if f):
-        return True
-    if exact_in(brand, " ".join(a.embedded_urls)):
-        return True
-    if request.official_domain:
-        official = registrable_domain(request.official_domain).lower()
-        if any(registrable_domain(u).lower() == official for u in a.embedded_urls):
-            return True
-    return False
-
-
-def apply_cert_mismatch(hit: Hit, request: ScanRequest) -> Hit:
-    """Add the cert_mismatch_with_similar_pkg bonus. Idempotent.
-
-    A different certificate only means "repackaged" when the app is really the brand's: the same
-    package ID (a repackage keeps it), or a similar one whose APK content references the brand.
-    A similar-but-unrelated package (an unrelated app named PhonePay) differs in certificate
-    trivially and must not be boosted for it. (Sister apps, signed separately by design, are removed
-    earlier through the caller's allowlist options.)
-    """
-    if (
-        hit.is_official_match
-        or not request.android_package
-        or not hit.package_id
-        or not hit.apk_analysis
-        or hit.apk_analysis.cert_match is not False
-        or _CERT_REASON in hit.reasons
-        or _brand_absent(hit, request)
-    ):
-        return hit
-    if hit.package_id != request.android_package:
-        # Edit-distance similarity, not substring: "x.y.photos.whatsapp" merely *contains* the
-        # official id's word, it is not a variant of it (com.gbwhatsapp is).
-        if not _is_package_variant(hit.package_id, request.android_package) or brand_referenced(hit, request) is not True:
-            return hit
-    bonus = _load_config()["signals"]["cert_mismatch_with_similar_pkg"]
-    return hit.model_copy(update={
-        "relevance_score": min(100, hit.relevance_score + bonus),
-        "reasons": hit.reasons + [_CERT_REASON],
-    })
-
-
-def apply_apk_brand_check(hit: Hit, request: ScanRequest) -> Hit:
-    """Demote an analyzed APK that never references the brand. Idempotent.
-
-    Brand evidence found only in the name is weak; once we have the APK, its absence from the
-    label, package, URLs and official domain is strong evidence of an unrelated app. A real
-    repackage keeps the official package ID, so that is never demoted here.
-    """
-    if (
-        hit.is_official_match
-        or _UNRELATED_REASON in hit.reasons
-        or (request.android_package and hit.package_id == request.android_package)
-        or brand_referenced(hit, request) is not False
-    ):
-        return hit
-    cap = _load_config()["signals"].get("apk_unrelated_cap", 30)
-    return hit.model_copy(update={
-        "relevance_score": min(hit.relevance_score, cap),
-        "reasons": hit.reasons + [_UNRELATED_REASON],
-    })
-
-
-_UNVERIFIED_REASON = (
-    "signature_unverified: same package ID as the official app on a third-party site and the signing "
-    "certificate was not checked, so this may be a genuine copy or a repackage (set analyze_apks and "
-    "official_cert_sha256 to verify)"
-)
-
-
-def apply_unverified_official_copy(hit: Hit, request: ScanRequest) -> Hit:
-    """Rank an unchecked copy of the official package below 'high'. Idempotent.
-
-    A genuine copy of the official app on a mirror matches the official name, package and permissions
-    perfectly, so it scores like the worst impersonator. Only the signing certificate tells them apart:
-    a mismatch is the repackaging signal (kept, boosted by apply_cert_mismatch), a match is removed by
-    split_cert_verified, and an unchecked copy is capped here and labelled signature_unverified.
-    """
-    official = (request.android_package or "").strip().lower()
-    if (
-        not official
-        or hit.is_official_match
-        or (hit.package_id or "").strip().lower() != official
-        or (hit.host and hit.host.is_official_store)
-        or (hit.apk_analysis and hit.apk_analysis.cert_match is not None)
-        or _UNVERIFIED_REASON in hit.reasons
-    ):
-        return hit
-    cap = _load_config()["signals"].get("unverified_official_copy_cap", 55)
-    return hit.model_copy(update={
-        "relevance_score": min(hit.relevance_score, cap),
-        "reasons": hit.reasons + [_UNVERIFIED_REASON],
-    })
-
-
 _PAGE_MARK = "[page]"
 
 
@@ -415,65 +286,6 @@ def apply_page_assessment(hit: Hit) -> Hit:
     if note is None:
         return hit
     return hit.model_copy(update={"relevance_score": score, "reasons": hit.reasons + [note]})
-
-
-_APK_PERM_MARK = "[apk]"
-
-
-def apply_apk_permissions(hit: Hit, official_apk_permissions: list[str], request: ScanRequest) -> Hit:
-    """Permission signals from a downloaded APK, compared against the official APK.
-
-    Both sides are manifest constants (android.permission.X), unlike the Play
-    Store label-based enrichment, so this only runs when an official APK was
-    supplied and the hit was actually analyzed. Skipped when the Play-based
-    enrichment already scored this hit, to avoid double counting. Idempotent.
-    """
-    from app.analysis.apk_similarity import android_excess_dangerous, android_permission_jaccard
-
-    perms = hit.apk_analysis.permissions if hit.apk_analysis else []
-    if (
-        not official_apk_permissions
-        or not perms
-        or hit.is_official_match
-        or hit.permission_similarity is not None
-        or any(_APK_PERM_MARK in r for r in hit.reasons)
-        or _brand_absent(hit, request)
-    ):
-        return hit
-
-    signals = _load_config()["signals"]
-    sim = android_permission_jaccard(official_apk_permissions, perms)
-    excess = android_excess_dangerous(official_apk_permissions, perms)
-    reasons = list(hit.reasons)
-    bonus = 0
-    # Same package and no certificate mismatch: matching permissions are expected, not suspicious.
-    same_app = bool(request.android_package and (hit.package_id or "").lower() == request.android_package.lower())
-    benign_match = same_app and hit.apk_analysis.cert_match is not False
-    if excess:
-        bonus += min(10, len(excess) * 2)
-        reasons.append(
-            f"{_APK_PERM_MARK} requests {len(excess)} dangerous permission(s) the official app does not: "
-            + ", ".join(p.rsplit(".", 1)[-1] for p in excess[:5])
-        )
-    if benign_match and sim >= 0.6:
-        reasons.append(f"{_APK_PERM_MARK} permission set {sim:.0%} matches official app (expected for the same package)")
-    elif sim >= 0.85:
-        if hit.apk_analysis.cert_match is False:
-            bonus += signals.get("repackaged_apk_bonus", 15)
-            reasons.append(f"{_APK_PERM_MARK} permission set {sim:.0%} identical to official — different cert (repackaged APK)")
-        else:
-            # Same permissions with a different package and no certificate mismatch: many unrelated apps request
-            # the same set, so this is not evidence of a copy. It adds nothing.
-            reasons.append(f"{_APK_PERM_MARK} permission set {sim:.0%} matches official app (no points: not a certificate mismatch)")
-    elif sim >= 0.60:
-        bonus += signals.get("permission_similarity_medium", 8)
-        reasons.append(f"{_APK_PERM_MARK} permission set {sim:.0%} overlaps with official app")
-
-    return hit.model_copy(update={
-        "permission_similarity": sim,
-        "relevance_score": min(100, hit.relevance_score + bonus),
-        "reasons": reasons,
-    })
 
 
 async def score_hit(hit: Hit, request: ScanRequest, official_publishers: set[str] | frozenset[str] = frozenset()) -> Hit:
@@ -569,7 +381,7 @@ async def _enrich_permission_similarity(
 ) -> list[Hit]:
     """Fetch candidate permissions from Play Store and apply two signals:
       1. Excess dangerous permissions — rogue requests dangerous perms the official doesn't
-      2. Permission Jaccard — overall overlap (high overlap + cert mismatch = repackaged)
+      2. Permission Jaccard — overall overlap with the official app's permissions
 
     Only runs when official_permissions is non-empty.
     Uses google_play_scraper.permissions() — no APK download required.
@@ -577,10 +389,10 @@ async def _enrich_permission_similarity(
     if not official_permissions:
         return hits
 
-    from app.analysis.apk_similarity import (
+    from app.services.play_listing import (
         android_excess_dangerous as excess_dangerous,
-        fetch_permissions,
         android_permission_jaccard as permission_jaccard,
+        fetch_permissions,
     )
 
     cfg = _load_config()
@@ -591,7 +403,7 @@ async def _enrich_permission_similarity(
             return hit
 
         # The official package itself (a copy on a mirror) has the official permissions by definition:
-        # identical permissions are no evidence against it. Only its signing certificate can be.
+        # identical permissions are no evidence against it.
         if official_package and hit.package_id.lower() == official_package.lower():
             return hit
 
@@ -627,17 +439,11 @@ async def _enrich_permission_similarity(
                 + ", ".join(excess[:5])
             )
 
-        # Signal 2 — Jaccard similarity
+        # Signal 2 — Jaccard similarity. Identical permissions alone are not evidence of a copy, so no points.
         if sim >= 0.85:
-            cert_mismatch = hit.apk_analysis and hit.apk_analysis.cert_match is False
-            if cert_mismatch:
-                bonus += signals.get("repackaged_apk_bonus", 15)
-                new_reasons.append(
-                    f"permission set {sim:.0%} identical to official — different cert (repackaged APK)"
-                )
-            else:
-                # Same permissions, no certificate mismatch: not evidence of a copy, so no points.
-                new_reasons.append(f"permission set {sim:.0%} matches official app (no points: not a certificate mismatch)")
+            new_reasons.append(
+                f"permission set {sim:.0%} matches official app (no points on their own)"
+            )
         elif sim >= 0.60:
             bonus += signals.get("permission_similarity_medium", 8)
             new_reasons.append(f"permission set {sim:.0%} overlaps with official app")
@@ -667,9 +473,8 @@ async def score_hits(
     so the caller can count them instead of losing them silently."""
     tasks = [score_hit(h, request, official_publishers) for h in hits]
     scored = list(await asyncio.gather(*tasks))
-    scored = [apply_cert_mismatch(h, request) for h in scored]
 
-    # Permission similarity enrichment (requires official APK to have been analyzed)
+    # Permission similarity enrichment (official permissions read from Google Play)
     if official_permissions:
         scored = await _enrich_permission_similarity(
             scored, official_permissions, request.brand_name, official_package=request.android_package,

@@ -175,7 +175,7 @@ class TelegramAdapter(SourceAdapter):
         for q in queries:
             url = _LYZEM_SEARCH.format(q=urllib.parse.quote(q))
             try:
-                resp = await fetch(url, rotate_ua=True, retries=1)
+                resp = await fetch(url, rotate_ua=True)
             except (BlockedError, FetchError) as e:
                 log.warning("telegram: Lyzem search failed for %r: %s", q, e)
                 continue

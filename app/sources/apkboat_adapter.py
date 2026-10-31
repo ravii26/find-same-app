@@ -2,7 +2,7 @@
 
 Search URL: https://apkboat.io/?s={query}   (robots.txt: no Disallow rules)
 Results are in the static HTML as cards: a.archive-post with the app page URL in href and the app name in h3.
-Only metadata is read. No APK file is fetched; APK analysis is off (see analyze_apks).
+Only metadata is read. No APK file is fetched.
 App URLs are slugs (/<slug>/) with no package id, so package_id stays empty.
 """
 
@@ -52,7 +52,7 @@ class APKBoatAdapter(SourceAdapter):
         for q in queries[:2]:
             url = _SEARCH.format(q=quote_plus(q))
             try:
-                html = decode_response(await fetch(url, rotate_ua=True, retries=1))
+                html = decode_response(await fetch(url, rotate_ua=True))
             except BlockedError as e:
                 return hits, SourceStatus(
                     name=self.name, method=self.method, status="blocked", error=str(e)

@@ -60,7 +60,7 @@ class APKKitAdapter(SourceAdapter):
                 hits.extend(await hits_with_browser_fallback(
                     url,
                     lambda html, q=q: self._parse(html, q, brand_tokens, seen),
-                    rotate_ua=True, retries=1, browser_wait_for="a.gs-title",
+                    rotate_ua=True, browser_wait_for="a.gs-title",
                 ))
             except BlockedError as e:
                 return hits, SourceStatus(

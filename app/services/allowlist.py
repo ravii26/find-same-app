@@ -11,7 +11,7 @@ Nothing is guessed. An app is allowlisted only when BOTH of these match what the
              Google Play and an Android id never counts on the App Store.
 
 The store the hit was found on does not count, and neither do its URL or its domain. A third-party copy that
-keeps both the name and the id is decided by the signing certificate (split_cert_verified), not here.
+keeps both the name and the id is decided by publisher and package id, not here.
 
 Non-app hits (web pages) keep one rule:
   domain     the URL's registrable domain is `official_domain` or one of `official_domains`.
@@ -68,12 +68,6 @@ def _domains(request: ScanRequest) -> set[str]:
     }
 
 
-def _on_official_store(hit: Hit) -> bool:
-    # The source sets is_official_store. A host group is only a label (app_store, official_store, apk_site),
-    # so a third-party store must not become official just by sharing a group name.
-    return bool(hit.host and hit.host.is_official_store)
-
-
 def official_publishers(request: ScanRequest) -> set[str]:
     """Normalised publisher names the caller declared (`official_publishers`)."""
     pubs = {_norm_publisher(p) for p in request.official_publishers}
@@ -87,8 +81,7 @@ def allowlist_reason(
     """Why this hit is allowlisted, or None.
 
     An app (a hit with a package id) is allowlisted only when its publisher and its package id both match
-    what the caller declared. The store it was found on, its URL and its domain do not count. A repackaged
-    copy keeps the id but not the signing certificate, so split_cert_verified handles those.
+    what the caller declared. The store it was found on, its URL and its domain do not count.
     Other hits (web pages) keep the domain rule.
     """
     pkg = (hit.package_id or "").strip().lower()
@@ -153,23 +146,3 @@ def _item(hit: Hit, reason: str) -> AllowlistedItem:
     )
 
 
-def split_cert_verified(hits: list[Hit], request: ScanRequest) -> tuple[list[Hit], list[AllowlistedItem]]:
-    """Move third-party copies of the official package whose signing certificate MATCHES the official one.
-
-    Same package id and same certificate: it is the genuine app on a mirror, not a rogue copy.
-    (Different certificate stays — that is the repackaging signal.)
-    """
-    official = (request.android_package or "").lower()
-    kept: list[Hit] = []
-    verified: list[AllowlistedItem] = []
-    for h in hits:
-        if (
-            official
-            and (h.package_id or "").lower() == official
-            and h.apk_analysis and h.apk_analysis.cert_match is True
-            and not _on_official_store(h)
-        ):
-            verified.append(audit_item(h, "same package and signing certificate as the official app (third-party mirror)"))
-        else:
-            kept.append(h)
-    return kept, verified

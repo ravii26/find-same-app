@@ -129,7 +129,7 @@ async def _capture_page(
     out: Path, hit: Hit, record: EvidenceRecord, brand: str | None, official_domain: str | None,
 ) -> EvidenceRecord:
     try:
-        resp = await fetch(hit.url, rotate_ua=True, retries=1)
+        resp = await fetch(hit.url, rotate_ua=True)
     except FetchError as exc:
         # A refusal (bot protection, 403, rate limit) is not the same as the page being down
         kind = "blocked" if is_blocked_message(str(exc)) else "page fetch failed"
@@ -161,7 +161,7 @@ async def _capture_page(
 
 async def _capture_icon(out: Path, url: str, record: EvidenceRecord) -> EvidenceRecord:
     try:
-        icon = (await fetch(url, rotate_ua=True, retries=1)).content
+        icon = (await fetch(url, rotate_ua=True)).content
     except Exception as exc:
         log.warning("evidence: icon fetch failed for %s: %s", url, exc)
         return record

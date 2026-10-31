@@ -62,7 +62,7 @@ class APKComboAdapter(SourceAdapter):
                 hits.extend(await hits_with_browser_fallback(
                     url,
                     lambda html, q=q: self._parse(html, q, brand_tokens, seen),
-                    rotate_ua=True, retries=1,
+                    rotate_ua=True,
                 ))
             except BlockedError as e:
                 return hits, SourceStatus(

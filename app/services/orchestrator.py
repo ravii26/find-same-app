@@ -19,7 +19,6 @@ from dataclasses import dataclass, field
 import redis.asyncio as aioredis
 
 from app.api.models import (
-    ApkAnalysisResult,
     Hit,
     ScanQuery,
     ScanContext,
@@ -35,18 +34,12 @@ from app.services.allowlist import (
     drop_official,
     official_publishers,
     split_allowlisted,
-    split_cert_verified,
 )
 from app.services.deduplicator import deduplicate, group_mirrors
 from app.services.keyword_expansion import expand
-from app.services.brand_match import presence_any
 from app.services.scoring import (
-    apply_apk_brand_check,
-    apply_apk_permissions,
-    apply_cert_mismatch,
     apply_page_assessment,
     min_relevance_for,
-    apply_unverified_official_copy,
     min_relevance,
     ruleset_version,
     score_hits,
@@ -68,60 +61,6 @@ class _State:
     statuses: list[SourceStatus] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     expanded_keywords: list = field(default_factory=list)
-
-
-def merge_apk_analysis(existing: ApkAnalysisResult | None, result: ApkAnalysisResult) -> ApkAnalysisResult:
-    """Combine what the store exposed (e.g. Aptoide's SHA-1) with what the downloaded APK showed.
-
-    Every value the analysis produced wins, certificate SHA-256 included: dropping it left Aptoide hits with
-    only the store's SHA-1 and no way to compare against `official_cert_sha256`.
-    """
-    if existing is None:
-        return result
-    return existing.model_copy(update={k: v for k, v in result.model_dump().items() if v is not None})
-
-
-_DISCOVERY_GROUPS = ("web_search", "lookalike_domain")
-
-
-async def _bounded_gather(tasks: list[asyncio.Task], timeout: float) -> set[asyncio.Task]:
-    """Run tasks within a time budget; cancel and drain anything that didn't finish."""
-    done, pending = await asyncio.wait(tasks, timeout=timeout)
-    for task in pending:
-        task.cancel()
-    if pending:
-        await asyncio.gather(*pending, return_exceptions=True)
-    return done
-
-
-async def discover_apks(hits: list[Hit], request: ScanRequest, limit: int, budget: float) -> tuple[list[Hit], int]:
-    """Open web pages that other sources found (search results, lookalike domains) and attach the APK
-    each one offers as `apk_url`, so the APK analysis can check it. Returns (hits, number of pages opened).
-
-    Lookalike-domain hits already went through the same check in their adapter and are skipped. Pages are
-    opened with bounded concurrency inside a time budget; whatever finished is kept.
-    """
-    from app.sources.lookalike_domain_adapter import apk_for_page
-
-    targets = [
-        h for h in hits
-        if h.type.value == "web_page" and not h.apk_url and h.host and h.host.group in _DISCOVERY_GROUPS
-        and not any(f.source == "lookalike_domains" for f in h.found_via)
-    ][:limit]
-    if not targets:
-        return hits, 0
-
-    sem = asyncio.Semaphore(6)
-
-    async def _one(hit: Hit) -> tuple[str, str | None]:
-        async with sem:
-            return hit.id, await apk_for_page(hit.url, request.brand_name, request.official_domain)
-
-    tasks = [asyncio.create_task(_one(h)) for h in targets]
-    done = await _bounded_gather(tasks, budget)
-    found = {hid: apk for hid, apk in (t.result() for t in done if not t.exception()) if apk}
-    updated = [h.model_copy(update={"apk_url": found[h.id]}) if h.id in found else h for h in hits]
-    return updated, len(done)
 
 
 async def run_scan(scan_id: str, request: ScanRequest, redis_client: aioredis.Redis) -> ScanReport:
@@ -176,7 +115,6 @@ def _build_report(scan_id: str, st: _State, error: str | None, duration_ms: int)
         scan_id=scan_id,
         query=ScanQuery(
             **(request.submitted or request.model_dump(exclude={"submitted"})),
-            analyze_apks=get_settings().analyze_apks,
             received_at=st.started_at,
         ),
         summary=summary,
@@ -245,7 +183,7 @@ async def _pipeline(scan_id: str, request: ScanRequest, redis_client: aioredis.R
     official_permissions: list[str] = []
     if request.android_package:
         try:
-            from app.analysis.apk_similarity import fetch_permissions
+            from app.services.play_listing import fetch_permissions
             official_permissions = await fetch_permissions(request.android_package)
             if not official_permissions:
                 warn(f"No permissions could be read for android_package '{request.android_package}' from Google Play; "
@@ -256,7 +194,7 @@ async def _pipeline(scan_id: str, request: ScanRequest, redis_client: aioredis.R
     # here means sister apps by the same company are recognised without the caller listing official_publishers.
     if request.android_package:
         try:
-            from app.analysis.apk_similarity import fetch_developer
+            from app.services.play_listing import fetch_developer
             developer = await fetch_developer(request.android_package)
         except Exception as exc:
             developer = None
@@ -264,8 +202,6 @@ async def _pipeline(scan_id: str, request: ScanRequest, redis_client: aioredis.R
         if developer and developer.casefold() not in {p.casefold() for p in request.official_publishers}:
             request = request.model_copy(update={"official_publishers": [*request.official_publishers, developer]})
             _note(scan_id, "INFO", f"official publisher '{developer}' read from the Google Play listing of {request.android_package}")
-
-    official_apk_permissions: list[str] = []
 
     ctx = ScanContext(
         scan_id=scan_id,
@@ -348,16 +284,6 @@ async def _pipeline(scan_id: str, request: ScanRequest, redis_client: aioredis.R
     deduped, st.allowlisted = split_allowlisted(deduped, request)
     st.hits = deduped
 
-    if settings.analyze_apks:
-        # Fake bank/payment apps mostly spread through a web page, not a store: look for the file they offer
-        await status_store.update_meta_field(redis_client, scan_id, phase="looking for offered apks")
-        deduped, opened = await discover_apks(
-            deduped, request, settings.apk_discovery_pages, settings.apk_discovery_seconds,
-        )
-        st.hits = deduped
-        offering = sum(1 for h in deduped if h.apk_url and h.type.value == "web_page")
-        _note(scan_id, "INFO", f"apk discovery: opened {opened} page(s), {offering} offer an APK")
-
     await status_store.update_meta_field(redis_client, scan_id, phase="scoring")
     await status_store.set_progress(redis_client, scan_id, 85)
 
@@ -381,60 +307,8 @@ async def _pipeline(scan_id: str, request: ScanRequest, redis_client: aioredis.R
     st.hits = scored
     await status_store.set_progress(redis_client, scan_id, 95)
 
-    # APK static analysis pass — download and analyze up to 10 non-official hits with APK URLs
-    if settings.analyze_apks:
-        await status_store.update_meta_field(redis_client, scan_id, phase="analyzing apks")
-        from app.analysis.apk_analyzer import analyze_from_url
-        official_cert = None
-
-        # Only hits with real brand evidence are worth a download: exact matches first, then close
-        # lookalike spellings. A name that is merely loosely similar ("Phonemes") is not analyzed.
-        def _evidence(h: Hit) -> str | None:
-            return presence_any([request.brand_name, *request.brand_aliases], h.app_name or h.title, h.package_id, h.publisher)
-
-        candidates = [h for h in scored if h.apk_url and not h.is_official_match and _evidence(h) in ("exact", "fuzzy")]
-        candidates.sort(key=lambda h: (_evidence(h) != "exact", -h.relevance_score))
-        to_analyze = candidates[:10]
-        if to_analyze:
-            apk_sem = asyncio.Semaphore(3)
-
-            async def _analyze_one(hit: Hit) -> Hit:
-                async with apk_sem:
-                    try:
-                        result = await analyze_from_url(hit.apk_url, official_cert)  # type: ignore[arg-type]
-                        return hit.model_copy(update={"apk_analysis": merge_apk_analysis(hit.apk_analysis, result)})
-                    except Exception as exc:
-                        warn(f"APK analysis failed for {hit.url}: {exc}")
-                        return hit
-
-            # APK downloads are slow and unpredictable: give the whole pass its own budget so it cannot eat the
-            # scan's time limit, and keep the APKs that finished.
-            tasks = [asyncio.create_task(_analyze_one(h)) for h in to_analyze]
-            done = await _bounded_gather(tasks, settings.apk_phase_seconds)
-            if len(done) < len(tasks):
-                warn(
-                    f"APK analysis stopped after {settings.apk_phase_seconds}s: {len(done)} of {len(tasks)} APKs were "
-                    "analysed, the rest are reported without APK evidence."
-                )
-            analyzed = [t.result() if t in done else h for t, h in zip(tasks, to_analyze)]
-            analyzed_by_id = {h.id: h for h in analyzed}
-            scored = [analyzed_by_id.get(h.id, h) for h in scored]
-            # Analysis may have produced a definitive cert_match the store didn't expose
-            scored = [apply_cert_mismatch(h, request) for h in scored]
-            scored = [apply_apk_permissions(h, official_apk_permissions, request) for h in scored]
-            # Last: an APK that never references the brand is demoted (and then suppressed below)
-            scored = [apply_apk_brand_check(h, request) for h in scored]
-            scored.sort(key=lambda h: h.relevance_score, reverse=True)
-            st.hits = scored
-
-    # Copies of the official package whose certificate was never checked must not outrank real impersonators
-    scored = [apply_unverified_official_copy(h, request) for h in scored]
-    scored.sort(key=lambda h: h.relevance_score, reverse=True)
-
     scored, official_dropped = drop_official(scored)
     st.allowlisted = st.allowlisted + official_dropped
-    scored, verified_mirrors = split_cert_verified(scored, request)
-    st.allowlisted = st.allowlisted + verified_mirrors
 
     # Hits that deeper inspection pushed under the reporting threshold are removed, with the reason kept
     def _suppress_low(hits: list[Hit]) -> list[Hit]:

@@ -104,7 +104,6 @@ class BingAdapter(SourceAdapter):
                     url,
                     lambda html, label=label: self._parse(html, label, brand_tokens, skip_domains, seen),
                     rotate_ua=True,
-                    retries=1,
                     headers={"Accept-Language": "en-US,en;q=0.9"},
                 ))
             except BlockedError as e:

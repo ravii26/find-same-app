@@ -24,6 +24,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from filelock import FileLock, Timeout
 
+from app.api.routes.brand_details import router as brand_details_router
 from app.api.routes.brands import router as brands_router
 from app.api.routes.scans import router as scans_router
 from app.config.settings import get_settings
@@ -173,6 +174,7 @@ def create_app() -> FastAPI:
 
     app.include_router(scans_router)
     app.include_router(brands_router)
+    app.include_router(brand_details_router)
 
     @app.get("/health", tags=["health"])
     async def health(request: Request) -> dict:

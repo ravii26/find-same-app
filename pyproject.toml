@@ -64,10 +64,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-worker = [
-    # androguard pulls matplotlib, networkx, ipython, frida — only needed in the worker
-    "androguard>=4.1,<5",
-]
 dev = [
     "pytest==8.3.4",
     "pytest-asyncio==0.24.0",

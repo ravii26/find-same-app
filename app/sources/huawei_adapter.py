@@ -190,7 +190,6 @@ class HuaweiAdapter(SourceAdapter):
             version=item.get("appVersionName") or None,
             icon_url=item.get("icon") or None,
             url=url,
-            is_official_match=bool(ctx.request.android_package and pkg == ctx.request.android_package),
             host=HostInfo(
                 group=self.host_group,
                 name="Huawei AppGallery",

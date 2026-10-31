@@ -46,8 +46,9 @@ class KeywordType(str, Enum):
 # ── Input schema ──────────────────────────────────────────────────────────────
 
 class ScanRequest(BaseModel):
-    brand_name: str = Field(..., min_length=1, max_length=200)
-    # A brand onboarded through /v1/brands: its confirmed ids, publishers and domains are added to this request
+    # Required unless brand_id is given: the brand's details are then read from its stored record
+    brand_name: str = Field("", max_length=200)
+    # A brand stored through /v1/brand-details: its name, aliases, domains and Play links are merged into this request
     brand_id: str | None = Field(None, max_length=64)
     # Other names the brand goes by, e.g. "YONO" for "YONO SBI". An app name containing one counts as the brand.
     brand_aliases: list[str] = Field(default_factory=list)
@@ -65,6 +66,12 @@ class ScanRequest(BaseModel):
     # The body as the client sent it, before a confirmed brand was merged in. Set by the API and reported as the
     # scan's query. Not part of the dedup hash.
     submitted: dict | None = Field(None, exclude=True)
+
+    @model_validator(mode="after")
+    def brand_name_or_brand_id(self):
+        if not self.brand_id and not self.brand_name.strip():
+            raise ValueError("give brand_name, or brand_id of a stored brand")
+        return self
 
     @model_validator(mode="before")
     @classmethod
@@ -140,21 +147,6 @@ class HostInfo(BaseModel):
     is_official_store: bool = False
 
 
-class ApkAnalysisResult(BaseModel):
-    sha256: str | None = None
-    md5: str | None = None
-    package_name: str | None = None
-    app_label: str | None = None  # name shown to the user, from the manifest
-    version: str | None = None
-    cert_sha256: str | None = None
-    cert_sha1: str | None = None
-    cert_match: bool | None = None
-    parser: str | None = None  # "androguard" or "fallback"
-    permissions: list[str] = Field(default_factory=list)
-    embedded_urls: list[str] = Field(default_factory=list)
-    analysis_error: str | None = None
-
-
 class EvidenceRecord(BaseModel):
     """Pointers to captured evidence; paths are relative to the hit's evidence dir."""
     captured_at: datetime
@@ -170,7 +162,7 @@ class EvidenceRecord(BaseModel):
     icon_sha256: str | None = None
     # What the captured page looks like: parked | blank | brand_bait | mentions_brand | neutral
     assessment: str | None = None
-    # Why nothing was fetched on purpose, e.g. the link is a file (it is analysed as an APK instead)
+    # Why nothing was fetched on purpose, e.g. the link is a file
     skipped: str | None = None
     # Why there is no page.png: screenshots off, Playwright missing, or the browser failed
     screenshot_error: str | None = None
@@ -197,7 +189,6 @@ class Hit(BaseModel):
     is_official_match: bool = False
     icon_similarity: float | None = None
     permission_similarity: float | None = None
-    apk_analysis: ApkAnalysisResult | None = None
     evidence: EvidenceRecord | None = None
     discovered_at: datetime
 
@@ -236,13 +227,11 @@ class ScanSummary(BaseModel):
 class ScanQuery(BaseModel):
     """The scan request as the API received it: every field of the submitted body, passed through unchanged.
 
-    New API fields show up here without changing this class. analyze_apks and received_at are not API input,
-    so they are set by the scanner.
+    New API fields show up here without changing this class. received_at is not API input, so the scanner sets it.
     """
     model_config = {"extra": "allow"}
 
     brand_name: str
-    analyze_apks: bool = False
     received_at: datetime
 
 
@@ -262,7 +251,7 @@ class ScanReport(BaseModel):
     summary: ScanSummary
     results: list[Hit] = Field(default_factory=list)
     allowlisted: list[AllowlistedItem] = Field(default_factory=list)
-    # Hits dropped after deeper inspection (e.g. APK analysis showed an unrelated app), with the reason
+    # Hits dropped after deeper inspection, with the reason
     suppressed: list[AllowlistedItem] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     expanded_keywords: list[Keyword] = Field(default_factory=list)

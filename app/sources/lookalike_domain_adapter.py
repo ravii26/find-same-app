@@ -131,52 +131,31 @@ async def _resolves(domain: str, sem: asyncio.Semaphore) -> bool:
     return True
 
 
-async def _safe_apk_link(html: str, page_url: str) -> str | None:
-    """First APK link on the page that passes the SSRF guard; the page is untrusted, so each link is re-checked."""
-    for link in extract_apk_links(html, page_url):
-        try:
-            await asyncio.to_thread(check_url, link)
-        except SSRFError as exc:
-            log.info("lookalike: dropping apk link %s: %s", link, exc)
-            continue
-        return link
-    return None
+async def _safe_apk_link(url: str) -> str | None:
+    """The link when it points at a public address. It is kept for the report and never fetched here."""
+    try:
+        await asyncio.to_thread(check_url, url)
+    except SSRFError:
+        return None
+    return url
 
 
 async def _find_apk(html: str, page_url: str) -> str | None:
-    """The APK a fake-app page offers: a link on the page itself, else one hop through its Download button.
+    """An APK link the page offers, or one on a same-site download page it leads to (one hop).
 
-    Fetching is limited to pages on the same site (find_download_pages) and goes through fetch(), which has the
-    SSRF guard and refuses direct file downloads; the file itself is only ever fetched by the APK analyzer.
+    Only pages are read, through fetch(); the APK file itself is never downloaded.
     """
-    apk = await _safe_apk_link(html, page_url)
-    if apk:
-        return apk
+    for link in extract_apk_links(html, page_url):
+        if safe := await _safe_apk_link(link):
+            return safe
     for page in find_download_pages(html, page_url):
         try:
             resp = await fetch(page, rotate_ua=True, retries=0, timeout=8)
-        except Exception as exc:  # down, blocked, or not a page: try the next one
-            log.info("lookalike: download page %s failed: %s: %s", page, type(exc).__name__, exc)
+        except FetchError:
             continue
-        apk = await _safe_apk_link(decode_response(resp), str(resp.request.url))
-        if apk:
-            return apk
-    return None
-
-
-async def apk_for_page(url: str, brand: str, official_domain: str | None) -> str | None:
-    """The APK a page offers, if it looks like a fake-app page (brand bait). None for any other page or failure.
-
-    Used for pages other sources found (search results, lookalike domains); same SSRF-guarded fetch and
-    one-hop Download-button follow as the lookalike probe.
-    """
-    try:
-        resp = await fetch(url, rotate_ua=True, retries=0, timeout=8)
-        html = decode_response(resp)
-        if assess_page(html, brand, official_domain) in ("brand_bait", "mentions_brand"):
-            return await _find_apk(html, str(resp.request.url))
-    except Exception as exc:  # down, blocked or not HTML: no APK to report
-        log.info("apk discovery: %s failed: %s: %s", url, type(exc).__name__, exc)
+        for link in extract_apk_links(decode_response(resp), str(resp.request.url)):
+            if safe := await _safe_apk_link(link):
+                return safe
     return None
 
 

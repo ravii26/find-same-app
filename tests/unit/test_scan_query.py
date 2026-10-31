@@ -9,7 +9,7 @@ from app.api.models import ScanQuery, ScanRequest
 
 def test_query_passes_through_every_submitted_field():
     body = {"brand_name": "YONO SBI", "brand_id": "brd_x", "new_api_field": [1, 2], "keywords": ["x"]}
-    query = ScanQuery(**body, analyze_apks=False, received_at=datetime.datetime.now(datetime.UTC))
+    query = ScanQuery(**body, received_at=datetime.datetime.now(datetime.UTC))
     dumped = query.model_dump()
     assert dumped["new_api_field"] == [1, 2]
     assert dumped["brand_id"] == "brd_x"

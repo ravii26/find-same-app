@@ -13,6 +13,7 @@ import datetime
 import hashlib
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 from app.api.models import (
     FoundVia,
@@ -24,6 +25,7 @@ from app.api.models import (
     SourceStatus,
 )
 from app.services.brand_match import brand_terms
+from app.utils.http_client import call_with_backoff
 from app.sources.base import SourceAdapter, country_label, scan_countries
 
 log = logging.getLogger(__name__)
@@ -116,7 +118,7 @@ class GooglePlayScraperAdapter(SourceAdapter):
             for term in terms:
                 for country in countries:
                     try:
-                        results = _search(term, country.lower(), n_hits=30)
+                        results = call_with_backoff(partial(_search, term, country.lower(), n_hits=30))
                         for r in results:
                             if not r:  # the library returns None for entries it can't parse
                                 continue
@@ -139,7 +141,7 @@ class GooglePlayScraperAdapter(SourceAdapter):
                 failures = []
                 for country in countries:
                     try:
-                        info = gp_app(android_package, country=country.lower())
+                        info = call_with_backoff(partial(gp_app, android_package, country=country.lower()))
                     except Exception as e:
                         failures.append(f"{country}: {e}")
                         continue

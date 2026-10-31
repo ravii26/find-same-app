@@ -30,8 +30,6 @@ signals:
   scam_lure_keyword: 6
   # Brand name used in a subdomain of web.app / herokuapp.com / pages.dev / github.io ...
   brand_on_free_hosting: 10
-  # Analyzed APK never references the brand/official domain: unrelated app with a similar name
-  apk_unrelated_cap: 30
   # Captured lookalike-domain page: brand + lure wording is boosted; a page that mentions the brand is kept as is.
   # Parked / blank / neutral / unreachable pages show nothing suspicious (a domain existing in DNS is not abuse;
   # brands register .co/.mx/.in defensively) and are capped. Must be one below min_relevance so they are excluded.
@@ -40,7 +38,6 @@ signals:
   # Utility/companion app ('Status Saver for WhatsApp', stickers): not an impersonation
   companion_app_penalty: 15
   lure_keyword_in_title: 5             # "mod", "cracked", "premium", "free"
-  cert_mismatch_with_similar_pkg: 15   # strongest rogue signal
   domain_has_brand_plus_keyword: 6     # petpooja-apk.com
   tld_swap: 4                          # petpooja.net vs petpooja.com
   package_id_suffix_variation: 5       # com.petpooja.fake vs com.petpooja.billing
@@ -50,15 +47,11 @@ signals:
   icon_phash_similar: 10               # similarity >= 0.80
   icon_phash_identical: 20             # similarity >= 0.95 (near-pixel-perfect clone)
   # Permission similarity vs official app (auto-fetched from Play Store via android_package)
-  # Jaccard >= 0.85 with no certificate mismatch adds no points (a shared permission list alone is not a copy)
+  # Jaccard >= 0.85 adds no points on its own (a shared permission list alone is not a copy)
   permission_similarity_medium: 8      # Jaccard >= 0.60 — significant overlap
-  repackaged_apk_bonus: 15             # stacked when Jaccard >= 0.85 AND cert mismatches (repackaged)
   # excess_dangerous: min(10, count * 2) — computed inline, not a fixed signal
   # Non-official listing with near-exact brand name on an official store
   official_store_name_clone: 15
-  # Same package ID as the official app on a third-party site, signing certificate not checked:
-  # it may be a genuine copy or a repackage, so it is ranked below 'high' until the certificate says which
-  unverified_official_copy_cap: 55
   # Brand-absent cap: hits with no brand token in name/package/publisher are capped here.
   # Must be one below min_relevance so capped hits are automatically excluded.
   no_brand_presence_cap: 34

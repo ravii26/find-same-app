@@ -25,7 +25,7 @@ async def compute_phash(image_url: str, hash_size: int = 8, cache: dict[str, str
         from PIL import Image
 
         async with _ICON_SEM:
-            resp = await fetch(image_url, rotate_ua=True, retries=1)
+            resp = await fetch(image_url, rotate_ua=True)
         img = Image.open(io.BytesIO(resp.content))
         result = str(imagehash.phash(img, hash_size=hash_size))
     except (FetchError, Exception) as exc:

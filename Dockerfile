@@ -28,7 +28,7 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--worker
 
 # ── Worker target ──────────────────────────────────────────────────────────────
 FROM base AS worker
-RUN pip install --no-cache-dir -e ".[worker]"
+RUN pip install --no-cache-dir -e "."
 # Playwright + Chromium for sources that require JS rendering (e.g. uptodown)
 RUN pip install --no-cache-dir playwright && playwright install --with-deps chromium
 COPY . .

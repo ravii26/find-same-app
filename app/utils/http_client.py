@@ -8,6 +8,8 @@ import logging
 import random
 import re
 import threading
+import time
+from typing import Callable, TypeVar
 from urllib.parse import urlparse
 
 import httpcore
@@ -20,6 +22,8 @@ from app.utils.ssrf_guard import SSRFError, check_url, resolve_safe
 from app.utils.url_tools import is_download_url
 
 log = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 _USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -86,19 +90,6 @@ class _SSRFCheckingTransport(httpx.AsyncHTTPTransport):
         super().__init__(*args, **kwargs)
         pool = self._pool
         pool._network_backend = _PinnedBackend(pool._network_backend)  # httpcore has no public hook for this
-
-
-def build_ssrf_client(timeout: httpx.Timeout | float, max_redirects: int = 5) -> httpx.AsyncClient:
-    """Plain client whose transport SSRF-checks every request, including redirect hops.
-
-    For callers that must bypass fetch()'s download-URL refusal (APK analysis).
-    """
-    return httpx.AsyncClient(
-        timeout=timeout,
-        follow_redirects=True,
-        max_redirects=max_redirects,
-        transport=_SSRFCheckingTransport(),
-    )
 
 
 def _build_client(settings: object | None = None) -> httpx.AsyncClient:
@@ -215,15 +206,112 @@ async def throttle(url: str) -> None:
         log.warning("rate limiter acquire failed for %s (fail-open): %s", host, e)
 
 
-class _RateLimited(Exception):
-    """A 429 reply. fetch() retries it with backoff and raises BlockedError when retries run out."""
+class _ThrottledError(Exception):
+    """A 403 or 429 reply: the source may be blocking us for now. fetch() waits and asks again."""
 
-    def __init__(self, url: str, retry_after: float | None) -> None:
-        super().__init__(f"Rate limited (429) from {url}")
+    def __init__(self, status: int, url: str, retry_after: float | None) -> None:
+        super().__init__(f"Rate limited (429) from {url}" if status == 429 else f"HTTP {status} from {url}")
         self.retry_after = retry_after
 
 
 _MAX_RETRY_AFTER = 30.0  # never sleep longer than this on a Retry-After header
+
+_slots: threading.Semaphore | None = None
+_slots_lock = threading.Lock()
+
+
+def _request_slots() -> threading.Semaphore:
+    """Outbound request slots shared by every scan thread in this process (threads cannot share an asyncio lock)."""
+    global _slots
+    with _slots_lock:
+        if _slots is None:
+            _slots = threading.Semaphore(get_settings().http_max_concurrency)
+        return _slots
+
+
+async def _acquire_slot() -> None:
+    # Polling instead of a blocking acquire: a waiting task can still be cancelled, and never strands a slot
+    slots = _request_slots()
+    while not slots.acquire(blocking=False):
+        await asyncio.sleep(0.05)
+
+
+_BLOCKED_STATUS = re.compile(r"Status code (403|429|5\d\d) returned")
+
+
+def call_with_backoff(call: Callable[[], T]) -> T:
+    """Run a blocking call that does not go through httpx (google_play_scraper) with fetch()'s rules.
+
+    Call it from a worker thread: it waits for a request slot and sleeps between attempts. A 403, 429 or 5xx
+    raised by the library is retried with the same backoff as fetch(); any other error is raised at once.
+    """
+    settings = get_settings()
+    for attempt in range(settings.http_retries + 1):
+        slots = _request_slots()
+        slots.acquire()
+        try:
+            return call()
+        except Exception as exc:
+            if attempt >= settings.http_retries or not _BLOCKED_STATUS.search(str(exc)):
+                raise
+            delay = min(settings.http_backoff_base * (2 ** attempt), _MAX_RETRY_AFTER) + random.uniform(0, 0.5)
+            log.info("source refused the request (%s); retrying in %.1fs", exc, delay)
+        finally:
+            slots.release()
+        time.sleep(delay)
+
+
+async def _get_once(
+    client: httpx.AsyncClient,
+    url: str,
+    method: str,
+    data: dict[str, str] | None,
+    headers: dict[str, str],
+    follow_redirects: bool,
+    timeout: float | None,
+    cap: int,
+) -> httpx.Response:
+    """One request. Returns the reply, or raises the error that says why there is no usable reply."""
+    stream_kwargs: dict = {"headers": headers, "follow_redirects": follow_redirects}
+    if timeout is not None:
+        stream_kwargs["timeout"] = timeout
+    if method.upper() == "POST" and data:
+        stream_kwargs["data"] = data
+    async with client.stream(method.upper(), url, **stream_kwargs) as resp:
+        if resp.status_code == 401:
+            raise BlockedError(f"HTTP 401 from {url}")
+        if resp.status_code in (403, 429):
+            raise _ThrottledError(resp.status_code, url, _retry_after_seconds(resp.headers.get("retry-after")))
+        if resp.status_code >= 500 and _is_bot_challenge(resp.headers):
+            # Cloudflare answers 5xx to a client it will not serve: that is "blocked", not "down"
+            raise BlockedError(f"Bot protection (HTTP {resp.status_code}) from {url}")
+        if 400 <= resp.status_code < 500:
+            # The server understood and said no; asking again gets the same answer
+            raise FetchError(f"HTTP {resp.status_code} from {url}")
+        if not (resp.is_redirect and not follow_redirects):
+            resp.raise_for_status()
+
+        # Enforce size cap
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in resp.aiter_bytes(chunk_size=8192):
+            total += len(chunk)
+            if total > cap:
+                raise FetchError(f"Response from {url} exceeds {cap} bytes limit")
+            chunks.append(chunk)
+
+        # Build a synthetic full response object.
+        # aiter_bytes() already decompresses; strip Content-Encoding so
+        # httpx.Response doesn't attempt a second decompression pass.
+        content = b"".join(chunks)
+        reply_headers = dict(resp.headers)
+        reply_headers.pop("content-encoding", None)
+        return httpx.Response(
+            status_code=resp.status_code,
+            headers=reply_headers,
+            content=content,
+            request=resp.request,
+        )
 
 
 async def fetch(
@@ -234,17 +322,18 @@ async def fetch(
     headers: dict[str, str] | None = None,
     max_bytes: int | None = None,
     rotate_ua: bool = True,
-    retries: int = 2,
-    backoff_base: float = 1.0,
+    retries: int | None = None,
+    backoff_base: float | None = None,
     timeout: float | None = None,
     follow_redirects: bool = True,
 ) -> httpx.Response:
     """
-    Fetch a URL with SSRF guard, size cap, UA rotation, and exponential backoff.
+    Fetch a URL with SSRF guard, size cap, UA rotation, concurrency limit and exponential backoff.
 
-    Never fetches direct download URLs. With follow_redirects=False a 3xx reply is returned as is
-    (callers use it as a signal, e.g. t.me answers 302 for channels without a public preview).
-    Raises BlockedError on 403/429/CAPTCHA, FetchError on other failures.
+    retries and backoff_base default to the http_retries and http_backoff_base settings. A 403, a 429, a 5xx
+    and network errors are retried; a 403 or 429 that persists raises BlockedError. Never fetches direct
+    download URLs. With follow_redirects=False a 3xx reply is returned as is (callers use it as a signal, e.g.
+    t.me answers 302 for channels without a public preview). Raises FetchError on other failures.
     """
     if is_download_url(url):
         raise FetchError(f"Refusing to fetch direct download URL: {url}")
@@ -262,6 +351,8 @@ async def fetch(
         merged_headers.update(headers)
 
     settings = get_settings()
+    retries = settings.http_retries if retries is None else retries
+    backoff_base = settings.http_backoff_base if backoff_base is None else backoff_base
     cap = max_bytes or settings.max_response_bytes
     client = await get_client()
 
@@ -271,55 +362,18 @@ async def fetch(
     last_exc: Exception = RuntimeError("no attempts made")
     for attempt in range(retries + 1):
         try:
-            stream_kwargs: dict = {"headers": merged_headers, "follow_redirects": follow_redirects}
-            if timeout is not None:
-                stream_kwargs["timeout"] = timeout
-            if method.upper() == "POST" and data:
-                stream_kwargs["data"] = data
-            async with client.stream(method.upper(), url, **stream_kwargs) as resp:
-                if resp.status_code in (403, 401):
-                    raise BlockedError(f"HTTP {resp.status_code} from {url}")
-                if resp.status_code == 429:
-                    raise _RateLimited(url, _retry_after_seconds(resp.headers.get("retry-after")))
-                if resp.status_code >= 500 and _is_bot_challenge(resp.headers):
-                    # Cloudflare answers 5xx to a client it will not serve: that is "blocked", not "down"
-                    raise BlockedError(f"Bot protection (HTTP {resp.status_code}) from {url}")
-                if 400 <= resp.status_code < 500:
-                    # The server understood and said no; asking again gets the same answer
-                    raise FetchError(f"HTTP {resp.status_code} from {url}")
-                if not (resp.is_redirect and not follow_redirects):
-                    resp.raise_for_status()
-
-                # Enforce size cap
-                chunks: list[bytes] = []
-                total = 0
-                async for chunk in resp.aiter_bytes(chunk_size=8192):
-                    total += len(chunk)
-                    if total > cap:
-                        raise FetchError(
-                            f"Response from {url} exceeds {cap} bytes limit"
-                        )
-                    chunks.append(chunk)
-
-                # Build a synthetic full response object.
-                # aiter_bytes() already decompresses; strip Content-Encoding so
-                # httpx.Response doesn't attempt a second decompression pass.
-                content = b"".join(chunks)
-                headers = dict(resp.headers)
-                headers.pop("content-encoding", None)
-                return httpx.Response(
-                    status_code=resp.status_code,
-                    headers=headers,
-                    content=content,
-                    request=resp.request,
-                )
-
+            # A slot is held only for the request itself, never while sleeping between attempts
+            await _acquire_slot()
+            try:
+                return await _get_once(client, url, method, data, merged_headers, follow_redirects, timeout, cap)
+            finally:
+                _request_slots().release()
         except (BlockedError, FetchError):
             raise
         except SSRFError as exc:  # a redirect hop (or rebinding answer) pointed somewhere forbidden
             raise FetchError(f"blocked by SSRF guard: {exc}") from exc
-        except _RateLimited as exc:
-            # Back off and try again: the source asked us to slow down, and a later slot usually works
+        except _ThrottledError as exc:
+            # The source is refusing us for now: wait, then ask again. Retry-After wins over our own schedule.
             last_exc = exc
             if attempt < retries:
                 delay = exc.retry_after if exc.retry_after is not None else backoff_base * (2 ** attempt)
@@ -330,7 +384,7 @@ async def fetch(
                 delay = backoff_base * (2 ** attempt) + random.uniform(0, 0.5)
                 await asyncio.sleep(delay)
 
-    if isinstance(last_exc, _RateLimited):
+    if isinstance(last_exc, _ThrottledError):
         raise BlockedError(str(last_exc)) from last_exc
     raise FetchError(f"All {retries + 1} attempts failed for {url}: {last_exc}") from last_exc
 

@@ -71,20 +71,6 @@ HITS_MAPPING: dict[str, Any] = {
             "closest_official": {"type": "keyword"},
             "similarity": {"type": "float"},
         }},
-        "apk_analysis": {"properties": {
-            "sha256": {"type": "keyword"},
-            "md5": {"type": "keyword"},
-            "package_name": _KW,
-            "app_label": _TEXT_KW,
-            "version": _KW,
-            "cert_sha256": {"type": "keyword"},
-            "cert_sha1": {"type": "keyword"},
-            "cert_match": {"type": "boolean"},
-            "parser": {"type": "keyword"},
-            "permissions": _KW,
-            "embedded_urls": _KW,
-            "analysis_error": {"type": "text"},
-        }},
         "evidence": {"properties": {
             "captured_at": {"type": "date"},
             "http_status": {"type": "integer"},
@@ -112,7 +98,6 @@ SCANS_MAPPING: dict[str, Any] = {
         "ios_bundle": _KW,
         "official_domain": _KW,
         "keywords": {"type": "keyword"},
-        "analyze_apks": {"type": "boolean"},
         "capture_evidence": {"type": "boolean"},
         "total_results": {"type": "integer"},
         "high_risk_count": {"type": "integer"},
@@ -169,7 +154,7 @@ def scan_document(
 ) -> dict[str, Any]:
     doc = request.model_dump(mode="json", include={
         "brand_name", "android_package", "ios_bundle", "official_domain",
-        "keywords", "analyze_apks", "capture_evidence",
+        "keywords", "capture_evidence",
     })
     doc.update(report.summary.model_dump(mode="json"))
     doc.update(

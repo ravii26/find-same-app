@@ -83,9 +83,6 @@ class GetAppsAdapter(SourceAdapter):
                             if icon_path else None
                         )
 
-                        is_official = bool(
-                            ctx.request.android_package and pkg == ctx.request.android_package
-                        )
                         hits.append(Hit(
                             id=uid,
                             type=HitType.app_listing,
@@ -95,7 +92,6 @@ class GetAppsAdapter(SourceAdapter):
                             publisher=item.get("developerName"),
                             icon_url=icon_url,
                             url=listing_url,
-                            is_official_match=is_official,
                             host=HostInfo(
                                 group=self.host_group,
                                 name="GetApps (Xiaomi)",

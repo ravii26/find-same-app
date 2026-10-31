@@ -19,12 +19,13 @@ import asyncio
 import json
 import logging
 import re
+from functools import partial
 from typing import Any
 from urllib.parse import parse_qs, quote, quote_plus, urlparse
 
 from app.services.allowlist import _norm_publisher as norm_name
 from app.utils.browser import collect_while_scrolling
-from app.utils.http_client import FetchError, decode_response, fetch, throttle
+from app.utils.http_client import FetchError, call_with_backoff, decode_response, fetch, throttle
 
 log = logging.getLogger(__name__)
 
@@ -73,7 +74,7 @@ async def _play_listing(pkg: str, cc: str) -> dict[str, Any] | None:
 
     await throttle(f"https://{_PLAY_HOST}/store/apps/details")
     try:
-        return await asyncio.to_thread(gp_app, pkg, lang="en", country=cc)
+        return await asyncio.to_thread(call_with_backoff, partial(gp_app, pkg, lang="en", country=cc))
     except Exception as exc:  # the library raises several types for missing or removed apps
         log.info("discovery: play listing %s unavailable: %s", pkg, exc)
         return None
@@ -91,7 +92,7 @@ async def _play_developer_packages(dev_id: str, cc: str, notes: list[str]) -> li
         packages, complete = await collect_while_scrolling(url, _DEV_PACKAGE_RE)
     except Exception as exc:  # Playwright missing or a browser failure: the static page still gives the first apps
         log.info("discovery: browser read of developer page %s failed, using the static page: %s", dev_id, exc)
-        html = decode_response(await fetch(url, retries=1))
+        html = decode_response(await fetch(url))
         packages = list(dict.fromkeys(_DEV_PACKAGE_RE.findall(html)))
         complete = False
     if not complete:
@@ -100,7 +101,7 @@ async def _play_developer_packages(dev_id: str, cc: str, notes: list[str]) -> li
 
 
 async def _itunes_json(url: str) -> dict[str, Any]:
-    return json.loads(decode_response(await fetch(url, retries=1)))
+    return json.loads(decode_response(await fetch(url)))
 
 
 async def _itunes_app(aid: int, cc: str) -> dict[str, Any] | None:
@@ -133,35 +134,45 @@ async def _seller_software(artist_ids: dict[int, None], cc: str) -> list[dict[st
 
 
 async def _play_candidates(
-    play_url: str, cc: str, terms: list[str], notes: list[str],
-) -> tuple[str, str, str, list[dict[str, Any]]]:
-    """Play candidates for the listed app and its developer. Returns (package, developer, developer id, candidates)."""
-    pkg = play_package_from_url(play_url)
-    if not pkg:
-        raise DiscoveryError("not a Google Play details link with an id")
-    listing = await _play_listing(pkg, cc)
-    if not listing:
-        raise DiscoveryError(f"Google Play listing for {pkg} could not be read")
-    dev_name = listing.get("developer") or ""
-    dev_id = listing.get("developerId") or ""
+    play_urls: list[str], cc: str, terms: list[str], notes: list[str],
+) -> tuple[list[tuple[str, str]], list[dict[str, Any]]]:
+    """Play candidates for the listed apps and their developers.
 
-    play_pkgs = [pkg]
-    if not dev_id:
-        notes.append("the Play listing has no developer id, so only the listed app was read")
-    else:
+    Returns ([(developer name, developer id), ...] in link order, candidates). A developer's page is read once,
+    however many of its apps were linked.
+    """
+    listed: dict[str, dict[str, Any]] = {}
+    for url in play_urls:
+        pkg = play_package_from_url(url)
+        if not pkg:
+            raise DiscoveryError("not a Google Play details link with an id")
+        listing = await _play_listing(pkg, cc)
+        if not listing:
+            raise DiscoveryError(f"Google Play listing for {pkg} could not be read")
+        listed.setdefault(pkg, listing)
+
+    developers: dict[str, str] = {}  # developer id -> developer name
+    for listing in listed.values():
+        if listing.get("developerId"):
+            developers.setdefault(listing["developerId"], listing.get("developer") or "")
+    if not developers:
+        notes.append("the Play listing has no developer id, so only the listed apps were read")
+
+    play_pkgs = list(listed)
+    for dev_id in developers:
         try:
             for other in await _play_developer_packages(dev_id, cc, notes):
                 if other not in play_pkgs:
                     play_pkgs.append(other)
         except FetchError as exc:
             log.info("discovery: developer page for %s unavailable: %s", dev_id, exc)
-            notes.append("the Play developer page could not be read, so only the listed app was read")
+            notes.append("the Play developer page could not be read, so only the listed apps were read")
 
     sem = asyncio.Semaphore(_CONCURRENCY)
 
     async def _info(p: str) -> dict[str, Any] | None:
         async with sem:
-            return await _play_listing(p, cc) if p != pkg else listing
+            return listed[p] if p in listed else await _play_listing(p, cc)
 
     infos = await asyncio.gather(*[_info(p) for p in play_pkgs])
 
@@ -171,11 +182,11 @@ async def _play_candidates(
             continue
         name = info.get("title") or p
         candidates.append({
-            "store": "play", "id": p, "name": name, "publisher": info.get("developer") or dev_name,
+            "store": "play", "id": p, "name": name, "publisher": info.get("developer") or "",
             "icon": info.get("icon"), "url": f"https://play.google.com/store/apps/details?id={p}",
-            "default": name_matches(name, terms),
+            "default": name_matches(name, terms), "linked": p in listed,
         })
-    return pkg, dev_name, dev_id, candidates
+    return [(name, dev_id) for dev_id, name in developers.items()], candidates
 
 
 async def _play_search(term: str, cc: str) -> list[dict[str, Any]]:
@@ -183,7 +194,7 @@ async def _play_search(term: str, cc: str) -> list[dict[str, Any]]:
     from google_play_scraper import search as gp_search
 
     await throttle(f"https://{_PLAY_HOST}/store/search")
-    return await asyncio.to_thread(gp_search, term, lang="en", country=cc, n_hits=30)
+    return await asyncio.to_thread(call_with_backoff, partial(gp_search, term, lang="en", country=cc, n_hits=30))
 
 
 async def _name_search_candidates(terms: list[str], cc: str, notes: list[str]) -> list[dict[str, Any]]:
@@ -222,53 +233,58 @@ async def _name_search_candidates(terms: list[str], cc: str, notes: list[str]) -
 
 
 async def discover(
-    play_url: str | None,
-    app_store_url: str | None,
+    play_urls: list[str],
+    app_store_urls: list[str],
     brand_name: str,
     aliases: list[str],
     cc: str,
 ) -> dict[str, Any]:
-    """Build the candidate list for one brand from a Play link, an App Store link or both.
+    """Build the candidate list for one brand from its Play links, App Store links or both.
 
-    Raises DiscoveryError when neither link is given, or when a given link cannot be read.
+    Each link is one app. Apps are grouped by developer (Play) and seller (App Store), so one developer or seller
+    is read once however many of its apps were linked. Raises DiscoveryError when no link is given, or when a
+    given link cannot be read.
     """
-    if not play_url and not app_store_url:
+    if not play_urls and not app_store_urls:
         raise DiscoveryError("give a Google Play link, an App Store link or both")
     cc = cc.lower()
     terms = [brand_name, *aliases]
     notes: list[str] = []
     candidates: list[dict[str, Any]] = []
-    pkg = dev_name = dev_id = None
-    artist_ids: dict[int, None] = {}
-    seller_name = None
-
-    if play_url:
-        pkg, dev_name, dev_id, play_items = await _play_candidates(play_url, cc, terms, notes)
+    developers: list[tuple[str, str]] = []
+    if play_urls:
+        developers, play_items = await _play_candidates(play_urls, cc, terms, notes)
         candidates.extend(play_items)
 
-    if app_store_url:
-        aid = app_store_id_from_url(app_store_url)
+    artist_ids: dict[int, None] = {}
+    linked_bundles: set[str] = set()  # the apps behind the App Store links
+    seller_name = None
+    for url in app_store_urls:
+        aid = app_store_id_from_url(url)
         if not aid:
             raise DiscoveryError("not an App Store link with an app id, e.g. https://apps.apple.com/in/app/name/id123")
         seed = await _itunes_app(aid, cc)
         if not seed or not seed.get("artistId"):
             raise DiscoveryError(f"App Store listing {aid} could not be read")
         artist_ids[int(seed["artistId"])] = None
-        seller_name = seed.get("artistName")
+        seller_name = seller_name or seed.get("artistName")
+        if seed.get("bundleId"):
+            linked_bundles.add(seed["bundleId"])
 
-    if dev_name:
+    for dev_name, _ in developers:
         artist_ids.update(await _artist_ids_by_name(dev_name, terms, cc))
-    if play_url and not app_store_url:
+    if play_urls and not app_store_urls:
         notes.append("App Store apps were matched by seller name from the Play developer, so confirm them")
-    if app_store_url and not play_url:
+    if app_store_urls and not play_urls:
         notes.append("no Google Play link was given, so Android apps were not read")
 
+    first_dev = developers[0][0] if developers else None
     for app in await _seller_software(artist_ids, cc):
         bundle = app["bundleId"]
         name = app.get("trackName") or bundle
         candidates.append({
-            "store": "app_store", "id": bundle, "name": name,
-            "publisher": app.get("artistName") or dev_name or seller_name or "",
+            "store": "app_store", "id": bundle, "name": name, "linked": bundle in linked_bundles,
+            "publisher": app.get("artistName") or first_dev or seller_name or "",
             "icon": app.get("artworkUrl60"), "url": app.get("trackViewUrl"),
             "default": name_matches(name, terms),
         })
@@ -281,9 +297,29 @@ async def discover(
         unique.setdefault((c["store"], c["id"]), c)
 
     return {
-        "play_package": pkg,
-        "play_developer": dev_name or seller_name or "",
-        "play_developer_id": dev_id or "",
+        "play_package": play_package_from_url(play_urls[0]) if play_urls else None,
+        "play_developer": first_dev or seller_name or "",
+        "play_developer_id": developers[0][1] if developers else "",
         "candidates": list(unique.values()),
         "notes": notes,
     }
+
+
+async def listed_app(url: str, cc: str) -> dict[str, str]:
+    """The store, id and publisher of the app behind one link, as the store shows them.
+
+    Raises DiscoveryError when the link is not a listing or the store cannot be read.
+    """
+    pkg = play_package_from_url(url)
+    if pkg:
+        listing = await _play_listing(pkg, cc.lower())
+        if not listing:
+            raise DiscoveryError(f"Google Play listing for {pkg} could not be read")
+        return {"store": "play", "id": pkg, "publisher": listing.get("developer") or ""}
+    aid = app_store_id_from_url(url)
+    if not aid:
+        raise DiscoveryError(f"{url} is not a store link with an id")
+    seed = await _itunes_app(aid, cc.lower())
+    if not seed or not seed.get("bundleId"):
+        raise DiscoveryError(f"App Store listing {aid} could not be read")
+    return {"store": "app_store", "id": seed["bundleId"], "publisher": seed.get("artistName") or ""}

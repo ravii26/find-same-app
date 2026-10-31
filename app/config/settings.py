@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     http_connect_timeout: float = 10.0
     http_read_timeout: float = 30.0
     http_max_redirects: int = 10
+    # Retries after a 403, 429, 5xx or network error. Waits double each time (base seconds, capped by Retry-After).
+    http_retries: int = 4
+    http_backoff_base: float = 2.0
+    # Requests in flight at once, across every scan in this process (the worker runs several scans in parallel)
+    http_max_concurrency: int = 16
 
     # API Keys (optional)
     github_token: str = ""
@@ -80,21 +85,12 @@ class Settings(BaseSettings):
     # Webhook
     webhook_timeout: int = 10
 
-    # APK Analysis
-    analyze_apks: bool = False
+    # Evidence capture
     capture_evidence: bool = False
-    apk_analysis_cpu_seconds: int = 30
-    apk_analysis_memory_mb: int = 256
-    apk_analysis_wall_seconds: int = 60
-    apk_phase_seconds: int = 180  # total time budget for the APK analysis pass; partial results are kept
-    apk_discovery_pages: int = 30  # most web pages opened per scan to look for an offered APK
-    apk_discovery_seconds: int = 60  # time budget for that step
-    apk_download_seconds: int = 90  # wall-clock cap on one APK download; a slow server cannot hold the pass
 
     def scan_ceiling_seconds(self) -> int:
-        """Hard limit for one scan. The APK analysis and discovery passes have their own budgets, so they are
-        added on top of the normal pipeline limit instead of being squeezed into it."""
-        return self.scan_timeout_seconds + self.apk_phase_seconds + self.apk_discovery_seconds
+        """Hard limit for one scan."""
+        return self.scan_timeout_seconds
 
     @field_validator("data_dir", "uploads_dir", mode="before")
     @classmethod

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 from typing import Annotated
 
@@ -15,7 +16,8 @@ from app.api.middleware.auth import require_api_key
 from app.api.models import ScanRequest, ScanStatus
 from app.config.settings import get_settings
 from app.jobs.actors import promote_pending
-from app.services import brand_store
+from app.services import discovery
+from app.storage import brand_index
 from app.storage import result_store, scan_log, status_store
 
 router = APIRouter(prefix="/v1", tags=["scans"])
@@ -55,6 +57,18 @@ def _queued(scan_id: str) -> JSONResponse:
     return JSONResponse(status_code=202, content={"scan_id": scan_id, "message": "Job queued"})
 
 
+async def _own_apps(details: dict) -> list[dict[str, str]]:
+    """The apps behind the brand's store links, read from their stores, so they are allowlisted for this scan.
+
+    A store that cannot be read stops the scan: an app is not allowlisted on a guessed publisher.
+    """
+    links = [*details.get("play_store_urls", []), *details.get("app_store_urls", [])]
+    try:
+        return list(await asyncio.gather(*[discovery.listed_app(url, details.get("country", "in")) for url in links]))
+    except discovery.DiscoveryError as exc:
+        raise HTTPException(status_code=503, detail=f"could not read the brand's store listing: {exc}") from exc
+
+
 # ── POST /v1/scans ────────────────────────────────────────────────────────────
 
 @router.post("/scans", status_code=status.HTTP_202_ACCEPTED, response_model=None)
@@ -70,12 +84,14 @@ async def create_scan(
     submitted = body.model_dump(mode="json", exclude={"submitted"})
 
     if body.brand_id:
-        record = brand_store.load(body.brand_id)
-        if record is None:
-            raise HTTPException(status_code=404, detail="brand not found")
-        if record["status"] != "done" or not record["confirmed"]:
-            raise HTTPException(status_code=409, detail="the brand's app list is not confirmed yet")
-        body = brand_store.apply_to_request(body, record)
+        try:
+            details = await brand_index.read(body.brand_id)
+        except brand_index.BrandNotFound as exc:
+            raise HTTPException(status_code=404, detail="brand not found") from exc
+        except brand_index.BrandIndexUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        own_apps = await _own_apps(details)
+        body = brand_index.merge_into_request(body, details, own_apps)
     body = body.model_copy(update={"submitted": submitted})
 
     in_flight = await status_store.running_count(redis) + await status_store.pending_count(redis)

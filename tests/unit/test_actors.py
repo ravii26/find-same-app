@@ -19,7 +19,6 @@ async def test_execute_scan_happy_path(tmp_path):
         "brand_name": "Petpooja",
         "android_packages": ["com.petpooja.billing"],
         "keywords": ["petpooja"],
-        "analyze_apks": False,
     }
 
     mock_report = MagicMock()

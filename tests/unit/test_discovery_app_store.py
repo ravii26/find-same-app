@@ -53,7 +53,7 @@ def test_non_app_store_links_have_no_app_id(url):
 
 async def test_app_store_only_discovers_the_sellers_apps(monkeypatch):
     _fake_itunes(monkeypatch)
-    result = await discovery.discover(None, APP_STORE, "YONO SBI", [], "in")
+    result = await discovery.discover([], [APP_STORE], "YONO SBI", [], "in")
 
     assert result["play_package"] is None
     assert result["play_developer"] == "State Bank of India"
@@ -65,7 +65,7 @@ async def test_app_store_only_discovers_the_sellers_apps(monkeypatch):
 
 async def test_no_link_is_an_error():
     with pytest.raises(discovery.DiscoveryError):
-        await discovery.discover(None, None, "YONO SBI", [], "in")
+        await discovery.discover([], [], "YONO SBI", [], "in")
 
 
 async def test_unknown_app_store_app_is_an_error(monkeypatch):
@@ -74,17 +74,17 @@ async def test_unknown_app_store_app_is_an_error(monkeypatch):
 
     monkeypatch.setattr(discovery, "_itunes_json", empty)
     with pytest.raises(discovery.DiscoveryError):
-        await discovery.discover(None, APP_STORE, "YONO SBI", [], "in")
+        await discovery.discover([], [APP_STORE], "YONO SBI", [], "in")
 
 
 def test_request_accepts_either_link_alone():
-    assert DiscoverRequest(brand_name="YONO SBI", app_store_url=APP_STORE).play_store_url is None
-    assert DiscoverRequest(brand_name="YONO SBI", play_store_url=PLAY).app_store_url is None
+    assert DiscoverRequest(brand_name="YONO SBI", app_store_urls=[APP_STORE]).play_store_urls == []
+    assert DiscoverRequest(brand_name="YONO SBI", play_store_urls=[PLAY]).app_store_urls == []
 
 
 def test_request_accepts_both_links():
-    body = DiscoverRequest(brand_name="YONO SBI", play_store_url=PLAY, app_store_url=APP_STORE)
-    assert body.play_store_url == PLAY and body.app_store_url == APP_STORE
+    body = DiscoverRequest(brand_name="YONO SBI", play_store_urls=[PLAY], app_store_urls=[APP_STORE])
+    assert body.play_store_urls == [PLAY] and body.app_store_urls == [APP_STORE]
 
 
 def test_request_needs_one_link():
@@ -94,4 +94,4 @@ def test_request_needs_one_link():
 
 def test_request_rejects_a_non_app_store_link_in_the_app_store_field():
     with pytest.raises(ValidationError):
-        DiscoverRequest(brand_name="YONO SBI", app_store_url=PLAY)
+        DiscoverRequest(brand_name="YONO SBI", app_store_urls=[PLAY])

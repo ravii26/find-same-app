@@ -1,4 +1,4 @@
-"""Official-store classification and per-host rate limits: the source's is_official_store flag decides, not the group label."""
+"""Per-host rate limits, and the publisher-and-id allowlist rule."""
 
 from __future__ import annotations
 
@@ -6,27 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.services.allowlist import _on_official_store
 from app.utils.rate_limiter import RateLimiter
-
-
-def _hit(group: str, is_official_store: bool):
-    return SimpleNamespace(host=SimpleNamespace(group=group, is_official_store=is_official_store))
-
-
-@pytest.mark.parametrize("group", ["app_store", "official_store"])
-def test_group_label_alone_does_not_make_a_store_official(group):
-    # Samsung, Indus, TapTap and F-Droid share these labels but are not the brand's own store
-    assert _on_official_store(_hit(group, is_official_store=False)) is False
-
-
-def test_official_flag_makes_a_store_official_in_any_group():
-    assert _on_official_store(_hit("apk_site", is_official_store=True)) is True
-    assert _on_official_store(_hit("app_store", is_official_store=True)) is True
-
-
-def test_no_host_is_not_official():
-    assert _on_official_store(SimpleNamespace(host=None)) is False
 
 
 @pytest.mark.parametrize("url, rps", [

@@ -13,15 +13,12 @@ to retrieve the signing certificate SHA-1 without downloading the APK.
 
 from __future__ import annotations
 
-import asyncio
 import datetime
 import hashlib
 import json as _json
 import logging
-from urllib.parse import urlencode
 
 from app.api.models import (
-    ApkAnalysisResult,
     FoundVia,
     Hit,
     HitType,
@@ -32,32 +29,12 @@ from app.api.models import (
 )
 from app.services.brand_match import brand_terms
 from app.sources.base import SourceAdapter
-from app.utils.cert import normalize_fingerprint
 from app.utils.http_client import FetchError, fetch
 
 log = logging.getLogger(__name__)
 
 _META_BASE = "https://ws75.aptoide.com/api/7/app/getMeta"
 
-
-async def _fetch_cert_sha1(package_name: str) -> str | None:
-    """Call Aptoide getMeta API to get the cert SHA-1 for a package without downloading the APK."""
-    if not package_name:
-        return None
-    try:
-        qs = urlencode({"package_name": package_name})
-        resp = await fetch(f"{_META_BASE}?{qs}", rotate_ua=False, retries=1)
-        data = _json.loads(resp.content)
-        sig = (
-            data.get("data", {})
-            .get("file", {})
-            .get("signature", {})
-            .get("sha1", "")
-        )
-        return sig.upper() if sig else None
-    except Exception as e:
-        log.warning("aptoide: cert fetch failed for %r: %s", package_name, e)
-        return None
 
 
 class AptoideAdapter(SourceAdapter):
@@ -106,8 +83,6 @@ class AptoideAdapter(SourceAdapter):
                 seen.add(uid)
 
                 file_obj = item.get("file") or {}
-                # Cert SHA-1 from search payload (already returned by the search API)
-                inline_sha1 = normalize_fingerprint((file_obj.get("signature") or {}).get("sha1"))
 
                 hits.append(
                     Hit(
@@ -121,9 +96,6 @@ class AptoideAdapter(SourceAdapter):
                         icon_url=item.get("icon") or None,
                         apk_url=file_obj.get("path") or file_obj.get("path_alt") or None,
                         url=listing_url,
-                        apk_analysis=ApkAnalysisResult(
-                            cert_sha1=inline_sha1, cert_match=None
-                        ) if inline_sha1 else None,
                         host=HostInfo(
                             group=self.host_group,
                             name="Aptoide",
@@ -135,24 +107,6 @@ class AptoideAdapter(SourceAdapter):
                         discovered_at=datetime.datetime.now(datetime.timezone.utc),
                     )
                 )
-
-        # Aptoide's advertised signature is store metadata, not the file's actual certificate: for the real
-        # WhatsApp APK it differed from the certificate inside the downloaded file. So it is recorded as
-        # information (cert_sha1) but never used to assert cert_match — that comes only from analysing the
-        # APK itself (or from sources that parse the file, e.g. VirusTotal).
-        async def _enrich(hit: Hit) -> Hit:
-            if not hit.package_id or (hit.apk_analysis and hit.apk_analysis.cert_sha1):
-                return hit
-            sha1 = await _fetch_cert_sha1(hit.package_id)
-            if not sha1:
-                return hit
-            return hit.model_copy(update={
-                "apk_analysis": ApkAnalysisResult(cert_sha1=normalize_fingerprint(sha1), cert_match=None),
-            })
-
-        if hits:
-            enriched = await asyncio.gather(*[_enrich(h) for h in hits[:8]])
-            hits[:8] = list(enriched)
 
         return hits, SourceStatus(
             name=self.name, method=self.method,

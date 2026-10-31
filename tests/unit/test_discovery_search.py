@@ -66,7 +66,7 @@ async def test_listed_app_is_not_replaced_by_a_search_hit(monkeypatch):
     monkeypatch.setattr(discovery, "_play_listing", listing)
     monkeypatch.setattr(discovery, "_play_developer_packages", no_dev)
     result = await discovery.discover(
-        "https://play.google.com/store/apps/details?id=com.sbi.lotusintouch", None, "YONO SBI", [], "in")
+        ["https://play.google.com/store/apps/details?id=com.sbi.lotusintouch"], [], "YONO SBI", [], "in")
     play = {c["id"]: c for c in result["candidates"] if c["store"] == "play"}
 
     assert play["com.sbi.lotusintouch"]["default"] is True  # the listed app keeps its own flag

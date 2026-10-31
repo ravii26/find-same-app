@@ -92,7 +92,7 @@ def _patch_network(monkeypatch):
 
 async def test_discovery_builds_candidates_per_store(monkeypatch):
     _patch_network(monkeypatch)
-    result = await discovery.discover(PLAY, None, "YONO SBI", aliases=["YONO"], cc="in")
+    result = await discovery.discover([PLAY], [], "YONO SBI", aliases=["YONO"], cc="in")
     by_key = {(c["store"], c["id"]): c for c in result["candidates"]}
 
     assert ("play", "com.sbi.lotusintouch") in by_key
@@ -103,7 +103,7 @@ async def test_discovery_builds_candidates_per_store(monkeypatch):
 
 async def test_only_brand_named_candidates_are_preselected(monkeypatch):
     _patch_network(monkeypatch)
-    result = await discovery.discover(PLAY, None, "YONO SBI", aliases=[], cc="in")
+    result = await discovery.discover([PLAY], [], "YONO SBI", aliases=[], cc="in")
     selected = {c["id"] for c in result["candidates"] if c["default"]}
     assert "com.sbi.lotusintouch" in selected
     assert "com.YONOMUApp" in selected
@@ -112,7 +112,7 @@ async def test_only_brand_named_candidates_are_preselected(monkeypatch):
 
 async def test_app_store_seller_is_matched_by_name_only(monkeypatch):
     _patch_network(monkeypatch)
-    result = await discovery.discover(PLAY, None, "YONO SBI", aliases=[], cc="in")
+    result = await discovery.discover([PLAY], [], "YONO SBI", aliases=[], cc="in")
     ios = [c for c in result["candidates"] if c["store"] == "app_store"]
     assert {c["id"] for c in ios} == {"com.sbi.YONOBD", "com.sbi.sbiquick.ios"}
     assert all(c["publisher"] == "State Bank of India" for c in ios)
@@ -124,7 +124,7 @@ async def test_unreadable_listing_is_a_discovery_error(monkeypatch):
 
     monkeypatch.setattr(discovery, "_play_listing", no_listing)
     with pytest.raises(discovery.DiscoveryError):
-        await discovery.discover(PLAY, None, "YONO SBI", aliases=[], cc="in")
+        await discovery.discover([PLAY], [], "YONO SBI", aliases=[], cc="in")
 
 
 # ── brand record: confirmation and the scan merge ─────────────────────────────
@@ -225,7 +225,7 @@ async def test_developer_page_falls_back_to_static_page_when_browser_fails(monke
         b'<a href="details?id=com.a.one"></a>'
     )
 
-    async def static(url, retries):
+    async def static(url, **kwargs):
         return httpx.Response(200, content=html, request=httpx.Request("GET", url))
 
     monkeypatch.setattr(discovery, "collect_while_scrolling", broken)
@@ -234,3 +234,93 @@ async def test_developer_page_falls_back_to_static_page_when_browser_fails(monke
     packages = await discovery._play_developer_packages("State+Bank+of+India", "in", notes)
     assert packages == ["com.a.one", "com.a.two"]
     assert notes == ["the Play developer page may not list every app of the developer"]
+
+
+# ── several links per store ───────────────────────────────────────────────────
+
+YONO_MU = "https://play.google.com/store/apps/details?id=com.YONOMUApp"
+
+
+async def test_links_for_one_developer_read_its_page_once(monkeypatch):
+    _patch_network(monkeypatch)
+    reads: list[str] = []
+
+    async def counted(dev_id, cc, notes):
+        reads.append(dev_id)
+        return list(PLAY_LISTINGS)
+
+    monkeypatch.setattr(discovery, "_play_developer_packages", counted)
+    result = await discovery.discover([PLAY, YONO_MU], [], "YONO SBI", [], "in")
+
+    assert reads == ["State+Bank+of+India"]
+    play_ids = [c["id"] for c in result["candidates"] if c["store"] == "play"]
+    assert len(play_ids) == len(set(play_ids))  # a link to an app the developer page also lists is not repeated
+
+
+def test_single_link_field_is_added_to_the_list():
+    body = DiscoverRequest(brand_name="YONO SBI", play_store_url=PLAY)
+    assert body.play_store_urls == [PLAY]
+
+
+def test_each_list_entry_is_checked():
+    with pytest.raises(ValidationError):
+        DiscoverRequest(brand_name="YONO SBI", play_store_urls=[PLAY, "https://example.com/app"])
+
+
+# ── the customer's own links are allowlisted at once ──────────────────────────
+
+async def test_apps_behind_the_links_are_confirmed_when_discovery_finishes(monkeypatch, brand_dir):
+    _patch_network(monkeypatch)
+    result = await discovery.discover([PLAY], [], "YONO SBI", [], "in")
+    record = brand_store.create(BRAND_ID, {"brand_name": "YONO SBI"})
+    record = brand_store.set_candidates(record, result)
+
+    confirmed = {(c["store"], c["id"]) for c in record["confirmed"]}
+    assert confirmed == {("play", "com.sbi.lotusintouch")}  # the linked app only, not the developer's other apps
+    assert record["confirmed"][0]["confirmed_by"] == brand_store.LINK_CONFIRMER
+
+
+async def test_other_apps_of_the_developer_still_need_confirmation(monkeypatch, brand_dir):
+    _patch_network(monkeypatch)
+    result = await discovery.discover([PLAY], [], "YONO SBI", [], "in")
+    record = brand_store.set_candidates(brand_store.create(BRAND_ID, {"brand_name": "YONO SBI"}), result)
+
+    assert ("play", "com.YONOMUApp") not in {(c["store"], c["id"]) for c in record["confirmed"]}
+
+
+async def test_confirm_keeps_the_linked_apps_even_when_left_out(monkeypatch, brand_dir):
+    _patch_network(monkeypatch)
+    result = await discovery.discover([PLAY], [], "YONO SBI", [], "in")
+    record = brand_store.set_candidates(brand_store.create(BRAND_ID, {"brand_name": "YONO SBI"}), result)
+    record = brand_store.confirm(record, [{"store": "play", "id": "com.YONOMUApp"}], "ops@example")
+
+    assert {c["id"] for c in record["confirmed"]} == {"com.sbi.lotusintouch", "com.YONOMUApp"}
+
+
+# ── the brand's own store links, read at scan time ────────────────────────────
+
+async def test_listed_app_reads_publisher_from_a_play_link(monkeypatch):
+    async def listing(pkg, cc):
+        return {"developer": "State Bank of India", "title": "YONO SBI"}
+
+    monkeypatch.setattr(discovery, "_play_listing", listing)
+    app = await discovery.listed_app(PLAY, "in")
+    assert app == {"store": "play", "id": "com.sbi.lotusintouch", "publisher": "State Bank of India"}
+
+
+async def test_listed_app_reads_bundle_and_seller_from_an_app_store_link(monkeypatch):
+    async def lookup(aid, cc):
+        return {"trackId": aid, "bundleId": "com.sbi.YONOBD", "artistName": "State Bank of India"}
+
+    monkeypatch.setattr(discovery, "_itunes_app", lookup)
+    app = await discovery.listed_app("https://apps.apple.com/in/app/yono-sbi-bangladesh/id1556426905", "in")
+    assert app == {"store": "app_store", "id": "com.sbi.YONOBD", "publisher": "State Bank of India"}
+
+
+async def test_unreadable_listing_is_a_discovery_error(monkeypatch):
+    async def missing(pkg, cc):
+        return None
+
+    monkeypatch.setattr(discovery, "_play_listing", missing)
+    with pytest.raises(discovery.DiscoveryError):
+        await discovery.listed_app(PLAY, "in")
