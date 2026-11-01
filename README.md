@@ -245,7 +245,71 @@ Other endpoints:
 | Method | Path | Purpose |
 |---|---|---|
 | `DELETE` | `/v1/scans/{scan_id}` | Delete a scan. Returns 409 while it is running. |
+| `POST` | `/v1/reports` | Store a user's report of a rogue app or page (below). |
 | `GET` | `/health` | Checks the API and Redis. Returns `{"status":"ok","redis":"ok"}`. |
+
+### Reporting a rogue app
+
+A user who finds a rogue app or page can report it. The report is stored as sent: nothing is fetched, checked or
+scored. A takedown system reads the stored reports later.
+
+```http
+POST /v1/reports
+X-API-Key: <key>
+Content-Type: application/json
+```
+
+```json
+{
+  "brand_name": "PhonePe",
+  "url": "https://aptoide.com/app/com.phonepay.android",
+  "app_name": "PhonePay",
+  "package_id": "com.phonepay.android",
+  "category": "impersonation",
+  "description": "Asked for my UPI PIN after install",
+  "country": "in",
+  "seen_at": "2026-11-01T10:00:00Z",
+  "reporter": {"reference": "ticket-4411", "contact": "user@example.com"},
+  "evidence_urls": ["https://cdn.example.com/shots/4411-1.png"]
+}
+```
+
+| Field | Required | Rule |
+|---|---|---|
+| `brand_name` | yes | A stored brand, found by name in any case. Otherwise 404. |
+| `url` | yes | The rogue app or page: an `http` or `https` link, up to 2,048 characters. |
+| `app_name` | no | Up to 200 characters |
+| `package_id` | no | An app id such as `com.example.app`, up to 255 characters |
+| `category` | no | `impersonation`, `scam_bait`, `mod`, `phishing_site` or `other` (default) |
+| `description` | no | Up to 2,000 characters |
+| `country` | no | Two letters: where the user saw it |
+| `seen_at` | no | ISO 8601 time, not in the future. A time without a zone is UTC. |
+| `reporter` | no | `reference` (the caller's ticket or user id, up to 100 characters) and `contact` (up to 200 characters) |
+| `evidence_urls` | no | Up to 5 `http` or `https` links to screenshots or other evidence |
+
+Any other field is refused with 422.
+
+Response, 201:
+
+```json
+{"report_id": "rpt_01M6C9WQ3K8Z2B7Y5T4R1N0P6D", "status": "open", "duplicate": false,
+ "received_at": "2026-11-01T18:02:11Z", "message": "Report received"}
+```
+
+The same app or page of the same brand is one report. A Play link is matched by its package and an App Store link by
+its app id, so the same listing in another language or country (`?hl=en-IN`) is the same report. Any other link is
+matched by its normalized URL. A repeat is added to the stored report instead of creating another, and returns 200:
+
+```json
+{"report_id": "rpt_01M5X2…", "status": "open", "duplicate": true, "report_count": 4,
+ "message": "Already reported; this report was added to it"}
+```
+
+Reports are stored in Elasticsearch (`rogue-reports`), one document per reported app or page, with every submission
+(description, reporter, evidence) and how many times it was reported (`report_count`). Only the first 100
+submissions are kept in full; every one is counted. The reporters' contact details are kept with the report but are
+not searchable. `status` is `open`; the takedown system will add its own states. Without Elasticsearch this
+endpoint returns 503.
 
 ---
 
