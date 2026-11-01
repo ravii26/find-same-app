@@ -277,7 +277,6 @@ class LookalikeDomainAdapter(SourceAdapter):
             for d in [official, *ctx.request.official_domains] if d
         }
 
-        now = datetime.datetime.now(datetime.UTC)
         hits: list[Hit] = []
         for domain in live:
             title, final_domain, apk_url, check = probe_by_domain.get(domain, (None, None, None, None))
@@ -300,7 +299,6 @@ class LookalikeDomainAdapter(SourceAdapter):
                 title=title or f"Lookalike domain {domain} (resolves in DNS)",
                 apk_url=apk_url,
                 evidence=check,
-                discovered_at=now,
             ))
 
         return hits, SourceStatus(

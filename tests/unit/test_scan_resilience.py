@@ -156,6 +156,19 @@ async def test_lookalike_domains_fail_when_dns_does_not_work():
     assert "does not resolve" in status.error
 
 
+async def test_lookalike_domain_that_offers_an_apk_is_reported():
+    """The one case this source reports. It used to crash building the hit (discovered_at passed twice)."""
+    from app.api.models import EvidenceRecord
+    from app.sources import lookalike_domain_adapter as mod
+    check = EvidenceRecord(captured_at=datetime.datetime.now(datetime.UTC), http_status=200, assessment="brand_bait")
+    probe = AsyncMock(return_value=("PhonePe APK download", "phonepe-apk.com", "https://phonepe-apk.com/phonepe.apk", check))
+    with patch.object(mod, "_resolves", AsyncMock(return_value=True)), patch.object(mod, "_probe", probe):
+        hits, status = await mod.LookalikeDomainAdapter().search(_ctx(official_domain="phonepe.com"))
+    assert status.status == "ok"
+    assert hits and status.results == len(hits)
+    assert all(h.apk_url == "https://phonepe-apk.com/phonepe.apk" and h.discovered_at for h in hits)
+
+
 # ── 2. An unreachable host is not retried for the rest of the scan ────────────
 
 
