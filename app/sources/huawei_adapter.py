@@ -14,40 +14,26 @@ App page:   https://appgallery.huawei.com/app/{appid}
 from __future__ import annotations
 
 import asyncio
-import datetime
 import hashlib
 import logging
 from urllib.parse import quote, unquote
 
 from app.api.models import (
-    FoundVia,
     Hit,
-    HitType,
-    HostInfo,
     ScanContext,
     SourceMethod,
     SourceStatus,
 )
 from app.services.keyword_expansion import fold_homoglyphs
-from app.sources.base import SourceAdapter
-
+from app.sources.base import SourceAdapter, brand_words, scraped_hit
+from app.utils.browser import browser_context
 from app.utils.http_client import throttle
 
 log = logging.getLogger(__name__)
 
-try:
-    from playwright.async_api import async_playwright as _async_playwright
-    _PLAYWRIGHT_OK = True
-except ImportError:
-    _async_playwright = None  # type: ignore[assignment]
-    _PLAYWRIGHT_OK = False
 
 _SEARCH_PAGE = "https://appgallery.huawei.com/search/{q}"
 
-_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-)
 
 _RESPONSE_TIMEOUT_S = 25
 _MAX_TERMS = 2  # each term is a full browser page load
@@ -82,13 +68,7 @@ class HuaweiAdapter(SourceAdapter):
     max_results = 10  # official store — expect 1 official app + a few lookalikes
 
     async def search(self, ctx: ScanContext) -> tuple[list[Hit], SourceStatus]:
-        if not _PLAYWRIGHT_OK:
-            return [], SourceStatus(
-                name=self.name, method=self.method, status="failed",
-                error="playwright not installed — run: pip install playwright && playwright install chromium",
-            )
-
-        brand_tokens = {t.lower() for t in fold_homoglyphs(ctx.request.brand_name).split() if len(t) >= 3}
+        brand_tokens = brand_words(ctx.request.brand_name)
         terms = [
             kw.term for kw in ctx.expanded_keywords
             if kw.type.value in ("original", "package")
@@ -100,15 +80,7 @@ class HuaweiAdapter(SourceAdapter):
         errors: list[str] = []
 
         try:
-            async with _async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-                )
-                bctx = await browser.new_context(
-                    accept_downloads=False,
-                    user_agent=_UA, locale="en-US", viewport={"width": 1280, "height": 900},
-                )
+            async with browser_context() as bctx:
                 for term in terms:
                     page = await bctx.new_page()
                     captured: asyncio.Future = asyncio.get_running_loop().create_future()
@@ -140,7 +112,6 @@ class HuaweiAdapter(SourceAdapter):
                         hit = self._to_hit(item, term, brand_tokens, ctx, seen)
                         if hit:
                             hits.append(hit)
-                await browser.close()
         except Exception as exc:
             log.warning("huawei_appgallery: scrape failed: %s", exc)
             return [], SourceStatus(
@@ -181,22 +152,17 @@ class HuaweiAdapter(SourceAdapter):
             return None
         seen.add(uid)
 
-        return Hit(
-            id=uid,
-            type=HitType.app_listing,
+        return scraped_hit(
+            self,
+            term,
+            url=url,
+            host_name="Huawei AppGallery",
+            host_domain="appgallery.huawei.com",
+            is_official_store=True,
+            hit_id=uid,
             title=name,
             app_name=name,
             package_id=pkg,
             version=item.get("appVersionName") or None,
             icon_url=item.get("icon") or None,
-            url=url,
-            host=HostInfo(
-                group=self.host_group,
-                name="Huawei AppGallery",
-                domain="appgallery.huawei.com",
-                is_official_store=True,
-            ),
-            found_via=[FoundVia(source=self.name, method=self.method, query=term)],
-            relevance_score=0,
-            discovered_at=datetime.datetime.now(datetime.timezone.utc),
         )

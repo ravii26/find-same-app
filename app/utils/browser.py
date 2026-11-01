@@ -1,20 +1,26 @@
 # app/utils/browser.py
-"""Rendered-page (Playwright) helpers for sources that need a real browser.
+"""Headless Chromium (Playwright) for the sources and pages that need a real browser.
 
-Browser navigation is rate-limited by the same per-domain limit as fetch(): throttle() runs before
-every page load. Playwright is a fallback, not a first step: hits_with_browser_fallback() asks for the
-page over httpx first and renders it only when that returns no results.
+Every page load goes through throttle(), the same per-domain limit as fetch(). Playwright is imported only when a
+browser is opened: the API image does not ship it, so the import error surfaces as that one source's failure.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import random
-import re
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
+from typing import TYPE_CHECKING
 
 from app.api.models import Hit
-from app.utils.http_client import _USER_AGENTS, BlockedError, FetchError, decode_response, fetch, throttle
+from app.sources.base import page_problem
+from app.utils.http_client import _USER_AGENTS, BlockedError, FetchError, throttle
+
+if TYPE_CHECKING:
+    from playwright.async_api import Browser, BrowserContext, Playwright
 
 log = logging.getLogger(__name__)
 
@@ -24,148 +30,142 @@ _CHROMIUM_ARGS = [
     "--disable-gpu",
     "--disable-blink-features=AutomationControlled",
 ]
+_HIDE_WEBDRIVER = "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
 
-_SHOW_MORE_RE = re.compile(r"^(see|show|load) more$", re.IGNORECASE)
+
+class ScanBrowser:
+    """One headless Chromium for the work of one scan. It starts on first use, so a scan that needs no browser
+    starts none, and it is closed by scan_browser() when the scan ends."""
+
+    def __init__(self) -> None:
+        self._playwright: Playwright | None = None
+        self._browser: Browser | None = None
+        self._lock = asyncio.Lock()
+
+    async def _start(self) -> Browser:
+        async with self._lock:  # sources start in parallel: only the first one launches the browser
+            if self._browser is None:
+                try:
+                    from playwright.async_api import async_playwright
+                except ImportError as exc:
+                    raise FetchError(
+                        "playwright not installed — run: pip install playwright && playwright install chromium"
+                    ) from exc
+                self._playwright = await async_playwright().start()
+                self._browser = await self._playwright.chromium.launch(headless=True, args=_CHROMIUM_ARGS)
+            return self._browser
+
+    async def new_context(self) -> BrowserContext:
+        """A fresh context: no profile, cookies or history carry over, and downloads are refused."""
+        browser = await self._start()
+        context = await browser.new_context(
+            user_agent=random.choice(_USER_AGENTS),
+            viewport={"width": 1280, "height": 800},
+            locale="en-US",
+            accept_downloads=False,
+        )
+        await context.add_init_script(_HIDE_WEBDRIVER)
+        return context
+
+    async def close(self) -> None:
+        try:
+            if self._browser is not None:
+                await self._browser.close()
+            if self._playwright is not None:
+                await self._playwright.stop()
+        except Exception as exc:  # closing must not fail the scan that is already finished
+            log.warning("could not close the scan browser: %s: %s", type(exc).__name__, exc)
+
+
+_scan_browser: ContextVar[ScanBrowser | None] = ContextVar("scan_browser", default=None)
+
+
+@asynccontextmanager
+async def scan_browser() -> AsyncIterator[ScanBrowser]:
+    """Makes one ScanBrowser the browser for everything run inside this block (tasks started here inherit it),
+    and closes it on exit."""
+    session = ScanBrowser()
+    token = _scan_browser.set(session)
+    try:
+        yield session
+    finally:
+        _scan_browser.reset(token)
+        await session.close()
+
+
+@asynccontextmanager
+async def browser_context() -> AsyncIterator[BrowserContext]:
+    """A fresh context in the scan's browser. Outside a scan it opens a browser for this one use and closes it."""
+    if _scan_browser.get() is None:
+        async with scan_browser():
+            async with browser_context() as context:
+                yield context
+        return
+    context = await _scan_browser.get().new_context()
+    try:
+        yield context
+    finally:
+        try:
+            await context.close()
+        except Exception as exc:  # a crashed browser cannot close its contexts; the scan browser's close handles it
+            log.debug("context close failed: %s", exc)
+
+
+async def page_html(
+    context: BrowserContext,
+    url: str,
+    *,
+    timeout_ms: int = 30000,
+    wait_for_selector: str | None = None,
+) -> str:
+    """HTML of `url` in an open context (the caller throttles). `wait_for_selector`: results filled in by script after load are read once
+    that selector is in the DOM, or as they are when it never appears (no results)."""
+    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+    page = await context.new_page()
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        if wait_for_selector:
+            try:
+                await page.wait_for_selector(
+                    wait_for_selector, state="attached", timeout=timeout_ms
+                )
+            except PlaywrightTimeoutError:
+                pass  # nothing rendered: the page as it is has no results
+        return await page.content()
+    finally:
+        await page.close()
 
 
 async def render_html(
-    url: str, *, wait_until: str = "domcontentloaded", timeout_ms: int = 30000, wait_for_selector: str | None = None,
+    url: str, *, timeout_ms: int = 30000, wait_for_selector: str | None = None
 ) -> str:
-    """Load `url` in headless Chromium and return the rendered HTML.
-
-    `wait_for_selector` is for pages whose results are filled in by script after load: the page is read
-    once that selector is in the DOM, or as it is when it never appears (no results).
-
-    Playwright is imported here, not at module level: the api image ships without it, and an import
-    error then surfaces as a failed fallback instead of breaking the whole app at startup.
-    """
-    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-    from playwright.async_api import async_playwright
-
+    """Rendered HTML of `url` in a browser of its own (one page load)."""
     await throttle(url)
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=_CHROMIUM_ARGS)
-        try:
-            # accept_downloads=False: a page that triggers a file download must not save that file to disk.
-            context = await browser.new_context(
-                user_agent=random.choice(_USER_AGENTS), viewport={"width": 1280, "height": 800}, locale="en-US",
-                accept_downloads=False,
-            )
-            await context.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
-            page = await context.new_page()
-            await page.goto(url, wait_until=wait_until, timeout=timeout_ms)
-            if wait_for_selector:
-                try:
-                    await page.wait_for_selector(wait_for_selector, state="attached", timeout=timeout_ms)
-                except PlaywrightTimeoutError:
-                    pass  # nothing rendered: the page as it is has no results
-            return await page.content()
-        finally:
-            await browser.close()
+    async with browser_context() as context:
+        return await page_html(
+            context, url, timeout_ms=timeout_ms, wait_for_selector=wait_for_selector
+        )
 
 
-async def collect_while_scrolling(
-    url: str, pattern: re.Pattern[str], *, max_rounds: int = 40, pause_ms: int = 1500, timeout_ms: int = 30000,
-) -> tuple[list[str], bool]:
-    """Scroll `url` in headless Chromium and collect the first group of `pattern` from every round's HTML.
-
-    Lists that fill in as the reader scrolls (or after a "Show more" click) are read until a few rounds in
-    a row add nothing, or until `max_rounds` is reached. Returns (matches in page order, complete): complete
-    is False when the round cap was hit while the page was still adding matches.
-    """
-    from playwright.async_api import async_playwright
-
-    await throttle(url)
-    seen: dict[str, None] = {}
-    quiet_rounds = 0
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=_CHROMIUM_ARGS)
-        try:
-            context = await browser.new_context(
-                user_agent=random.choice(_USER_AGENTS), viewport={"width": 1280, "height": 800}, locale="en-US",
-                accept_downloads=False,
-            )
-            await context.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
-            page = await context.new_page()
-            await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-            await page.wait_for_timeout(pause_ms)
-            for _ in range(max_rounds):
-                before = len(seen)
-                for match in pattern.findall(await page.content()):
-                    seen.setdefault(match, None)
-                quiet_rounds = 0 if len(seen) > before else quiet_rounds + 1
-                if quiet_rounds >= 3:
-                    return list(seen), True
-                more = page.get_by_role("button", name=_SHOW_MORE_RE)
-                if await more.count():
-                    try:
-                        await more.first.click(timeout=2000)
-                    except Exception as exc:  # the button went away or is covered: the next scroll still reads on
-                        log.debug("show-more click on %s failed: %s", url, exc)
-                await page.mouse.wheel(0, 4000)
-                await page.wait_for_timeout(pause_ms)
-            return list(seen), False
-        finally:
-            await browser.close()
-
-
-async def html_with_browser_fallback(
-    url: str, has_results: Callable[[str], bool], **fetch_kwargs,
-) -> str:
-    """Page HTML for `url`: httpx first, Playwright only when httpx gives no results.
-
-    `has_results` decides what "results" means for the page. Raises BlockedError/FetchError only when
-    httpx failed and the browser found nothing either, so the adapter still reports a block as blocked.
-    An empty httpx page counts as "no results" too, so the browser is tried for it.
-    """
-    error: FetchError | None = None
-    html = ""
-    try:
-        html = decode_response(await fetch(url, **fetch_kwargs))
-        if has_results(html):
-            return html
-    except (BlockedError, FetchError) as exc:
-        error = exc
-
-    log.info("no results over httpx for %s, trying the browser", url)
-    try:
-        rendered = await render_html(url)
-    except Exception as exc:  # Playwright missing, browser crash, page timeout: the httpx outcome stands
-        log.warning("browser fallback failed for %s: %s", url, exc)
-        if error is not None:
-            raise error
-        return html
-    if has_results(rendered):
-        return rendered
-    if error is not None:
-        raise error
-    return html
-
-
-async def hits_with_browser_fallback(
-    url: str, parse: Callable[[str], list[Hit]], *, browser_wait_for: str | None = None, **fetch_kwargs,
+async def hits_from_browser(
+    url: str,
+    parse: Callable[[str], list[Hit]],
+    *,
+    wait_for_selector: str | None = None,
 ) -> list[Hit]:
-    """Hits for `url`: httpx first, Playwright only when httpx gives no results.
+    """Hits for `url` from its rendered page.
 
-    Same rules as html_with_browser_fallback, with "results" meaning `parse` returned hits.
-    `browser_wait_for` is the selector the browser waits for (see render_html) when results are script-rendered.
+    A block or challenge page with no hits raises BlockedError, so the source is reported as blocked and not as
+    an empty result. Any other browser failure raises FetchError.
     """
-    error: FetchError | None = None
     try:
-        hits = parse(decode_response(await fetch(url, **fetch_kwargs)))
-    except (BlockedError, FetchError) as exc:
-        hits, error = [], exc
-    if hits:
-        return hits
-
-    log.info("no results over httpx for %s, trying the browser", url)
-    try:
-        hits = parse(await render_html(url, wait_for_selector=browser_wait_for))
-    except Exception as exc:  # Playwright missing, browser crash, page timeout: the httpx outcome stands
-        log.warning("browser fallback failed for %s: %s", url, exc)
-        if error is not None:
-            raise error
-        return []
-    if not hits and error is not None:
-        raise error
+        html = await render_html(url, wait_for_selector=wait_for_selector)
+    except FetchError:
+        raise
+    except Exception as exc:  # browser crash, page timeout, navigation error
+        raise FetchError(f"browser failed: {type(exc).__name__}: {exc}") from exc
+    hits = parse(html)
+    if not hits and (problem := page_problem(None, "", html)):
+        raise BlockedError(f"{url}: {problem}")
     return hits

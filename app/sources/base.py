@@ -4,13 +4,16 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
+import hashlib
 import logging
 import re
 import time
 from abc import ABC, abstractmethod
 from typing import Literal
 
-from app.api.models import Hit, ScanContext, SourceMethod, SourceStatus
+from app.api.models import FoundVia, Hit, HitType, HostInfo, ScanContext, SourceMethod, SourceStatus
+from app.services.keyword_expansion import fold_homoglyphs
 
 log = logging.getLogger(__name__)
 
@@ -107,6 +110,42 @@ def scrape_status(
     return SourceStatus(
         name=name, method=method, status=status, results=len(hits),
         error="; ".join(dict.fromkeys(problems))[:300] or None,
+    )
+
+
+# A package name embedded in a store's URL or page source, e.g. "com.example.app". Domain names are skipped.
+_EMBEDDED_PKG_RE = re.compile(r"\b((?:com|net|org|in|io|co)\.[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]+)+)\b")
+_DOMAIN_TLDS = (".com", ".net", ".org", ".io", ".co", ".in")
+
+
+def embedded_package(text: str) -> str:
+    """The first package name in `text` that is not a domain name, or "" when there is none."""
+    for m in _EMBEDDED_PKG_RE.finditer(text):
+        if not m.group(1).endswith(_DOMAIN_TLDS):
+            return m.group(1)
+    return ""
+
+
+def brand_words(brand: str) -> set[str]:
+    """The lower-cased words of a brand name that a result must contain to count (short words are ignored)."""
+    return {t.lower() for t in fold_homoglyphs(brand).split() if len(t) >= 3}
+
+
+def scraped_hit(
+    adapter: SourceAdapter, query: str, *, url: str, host_name: str, host_domain: str,
+    group: str | None = None, hit_type: HitType = HitType.app_listing, hit_id: str | None = None, **fields,
+) -> Hit:
+    """A hit read from a scraped page. Its id is the hash of its URL, and the adapter's name, method and host group
+    are filled in. Whatever the page gives (app name, package, publisher, icon...) is passed in as `fields`."""
+    return Hit(
+        id=hit_id or hashlib.sha256(url.encode()).hexdigest()[:32],
+        type=hit_type,
+        url=url,
+        host=HostInfo(group=group or adapter.host_group, name=host_name, domain=host_domain, is_official_store=False),
+        found_via=[FoundVia(source=adapter.name, method=adapter.method, query=query)],
+        relevance_score=0,
+        discovered_at=datetime.datetime.now(datetime.timezone.utc),
+        **fields,
     )
 
 

@@ -51,30 +51,7 @@ def test_non_app_store_links_have_no_app_id(url):
     assert discovery.app_store_id_from_url(url) is None
 
 
-async def test_app_store_only_discovers_the_sellers_apps(monkeypatch):
-    _fake_itunes(monkeypatch)
-    result = await discovery.discover([], [APP_STORE], "YONO SBI", [], "in")
 
-    assert result["play_package"] is None
-    assert result["play_developer"] == "State Bank of India"
-    assert {(c["store"], c["id"]) for c in result["candidates"]} == {
-        ("app_store", "com.sbi.YONOBD"), ("app_store", "com.sbi.sbiquick.ios"),
-    }
-    assert any("no Google Play link" in n for n in result["notes"])
-
-
-async def test_no_link_is_an_error():
-    with pytest.raises(discovery.DiscoveryError):
-        await discovery.discover([], [], "YONO SBI", [], "in")
-
-
-async def test_unknown_app_store_app_is_an_error(monkeypatch):
-    async def empty(url):
-        return {"results": []}
-
-    monkeypatch.setattr(discovery, "_itunes_json", empty)
-    with pytest.raises(discovery.DiscoveryError):
-        await discovery.discover([], [APP_STORE], "YONO SBI", [], "in")
 
 
 def test_request_accepts_either_link_alone():

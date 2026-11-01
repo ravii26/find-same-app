@@ -1,6 +1,8 @@
-"""Browser fallback and rate-limit coverage: httpx first, Playwright only when httpx gives no results."""
+"""Rate limits for fetch() and the rendered-page helpers that every browser source uses."""
 
 from __future__ import annotations
+
+import sys
 
 import pytest
 
@@ -97,11 +99,8 @@ async def test_render_html_throttles_before_navigation(monkeypatch):
         pass
 
     class _FailingPlaywright:
-        async def __aenter__(self):
+        async def start(self):
             raise _Boom()
-
-        async def __aexit__(self, *exc):
-            return None
 
     import playwright.async_api as pw
 
@@ -140,102 +139,49 @@ def test_retry_after_parses_seconds_only():
     assert http_client._retry_after_seconds(None) is None
 
 
-# ── httpx first; the browser only when httpx gives no results ──────────────────
+# ── the browser reads the page; a block page is reported as blocked ───────────
 
-async def test_hits_from_httpx_skip_browser(monkeypatch):
-    async def _fetch(url, **kw):
-        return _FakeResponse(body=b"<html>results</html>")
-
+def _render_as(monkeypatch, html: str) -> None:
     async def _render(url, **kw):
-        raise AssertionError("browser must not run when httpx has results")
+        return html
 
-    monkeypatch.setattr(browser, "fetch", _fetch)
     monkeypatch.setattr(browser, "render_html", _render)
-    hits = await browser.hits_with_browser_fallback("https://x", lambda html: ["hit"])
+
+
+async def test_hits_come_from_the_rendered_page(monkeypatch):
+    _render_as(monkeypatch, "<html>cards</html>")
+    hits = await browser.hits_from_browser("https://x", lambda html: ["hit"] if "cards" in html else [])
     assert hits == ["hit"]
 
 
-async def test_empty_httpx_falls_back_to_browser(monkeypatch):
-    async def _fetch(url, **kw):
-        return _FakeResponse(body=b"<html>empty</html>")
-
-    async def _render(url, **kw):
-        return "<html>rendered</html>"
-
-    monkeypatch.setattr(browser, "fetch", _fetch)
-    monkeypatch.setattr(browser, "render_html", _render)
-    hits = await browser.hits_with_browser_fallback(
-        "https://x", lambda html: ["rendered"] if "rendered" in html else [],
-    )
-    assert hits == ["rendered"]
+async def test_clean_empty_page_is_no_results_not_blocked(monkeypatch):
+    _render_as(monkeypatch, "<html>nothing here</html>")
+    assert await browser.hits_from_browser("https://x", lambda html: []) == []
 
 
-async def test_blocked_httpx_and_empty_browser_stays_blocked(monkeypatch):
-    async def _fetch(url, **kw):
-        raise BlockedError("HTTP 403 from https://x")
-
-    async def _render(url, **kw):
-        return "<html>no cards</html>"
-
-    monkeypatch.setattr(browser, "fetch", _fetch)
-    monkeypatch.setattr(browser, "render_html", _render)
-    with pytest.raises(BlockedError, match="HTTP 403"):
-        await browser.hits_with_browser_fallback("https://x", lambda html: [])
-
-
-async def test_blocked_httpx_and_browser_failure_stays_blocked(monkeypatch):
-    async def _fetch(url, **kw):
-        raise BlockedError("HTTP 403 from https://x")
-
-    async def _render(url, **kw):
-        raise RuntimeError("playwright not installed")
-
-    monkeypatch.setattr(browser, "fetch", _fetch)
-    monkeypatch.setattr(browser, "render_html", _render)
+async def test_block_page_without_hits_is_blocked(monkeypatch):
+    _render_as(monkeypatch, "<html>Just a moment... captcha</html>")
     with pytest.raises(BlockedError):
-        await browser.hits_with_browser_fallback("https://x", lambda html: [])
+        await browser.hits_from_browser("https://x", lambda html: [])
 
 
-async def test_clean_empty_httpx_page_tries_browser_and_returns_nothing(monkeypatch):
-    rendered_urls: list[str] = []
-
-    async def _fetch(url, **kw):
-        return _FakeResponse(body=b"<html>no matches</html>")
-
+async def test_browser_crash_is_a_fetch_error(monkeypatch):
     async def _render(url, **kw):
-        rendered_urls.append(url)
-        return "<html>still no matches</html>"
+        raise RuntimeError("chromium crashed")
 
-    monkeypatch.setattr(browser, "fetch", _fetch)
     monkeypatch.setattr(browser, "render_html", _render)
-    assert await browser.hits_with_browser_fallback("https://x", lambda html: []) == []
-    assert rendered_urls == ["https://x"]
+    with pytest.raises(FetchError, match="chromium crashed"):
+        await browser.hits_from_browser("https://x", lambda html: [])
 
 
-async def test_html_fallback_returns_rendered_page_when_it_has_results(monkeypatch):
-    async def _fetch(url, **kw):
-        return _FakeResponse(body=b"<html>empty</html>")
+async def test_missing_playwright_says_how_to_install_it(monkeypatch):
+    async def _no_throttle(url):
+        return None
 
-    async def _render(url, **kw):
-        return "<html>videos</html>"
-
-    monkeypatch.setattr(browser, "fetch", _fetch)
-    monkeypatch.setattr(browser, "render_html", _render)
-    html = await browser.html_with_browser_fallback("https://x", lambda page: "videos" in page)
-    assert html == "<html>videos</html>"
-
-
-async def test_html_fallback_raises_when_httpx_blocked_and_browser_empty(monkeypatch):
-    async def _fetch(url, **kw):
-        raise FetchError("network down")
-
-    async def _render(url, **kw):
-        return "<html>nothing</html>"
-
-    monkeypatch.setattr(browser, "fetch", _fetch)
-    monkeypatch.setattr(browser, "render_html", _render)
-    with pytest.raises(FetchError, match="network down"):
-        await browser.html_with_browser_fallback("https://x", lambda page: False)
+    monkeypatch.setattr(browser, "throttle", _no_throttle)
+    monkeypatch.setitem(sys.modules, "playwright.async_api", None)  # the import then raises ImportError
+    with pytest.raises(FetchError, match="playwright install chromium"):
+        await browser.render_html("https://x")
 
 
 async def test_render_html_refuses_downloads(monkeypatch):
@@ -250,6 +196,9 @@ async def test_render_html_refuses_downloads(monkeypatch):
 
         async def content(self):
             return "<html></html>"
+
+        async def close(self):
+            return None
 
     class _Context:
         async def add_init_script(self, *a):
@@ -273,12 +222,12 @@ async def test_render_html_refuses_downloads(monkeypatch):
     class _Playwright:
         chromium = _Chromium()
 
-    class _Manager:
-        async def __aenter__(self):
-            return _Playwright()
-
-        async def __aexit__(self, *exc):
+        async def stop(self):
             return None
+
+    class _Manager:
+        async def start(self):
+            return _Playwright()
 
     async def _no_throttle(url):
         return None
@@ -287,3 +236,80 @@ async def test_render_html_refuses_downloads(monkeypatch):
     monkeypatch.setattr(browser, "throttle", _no_throttle)
     await browser.render_html("https://example.com/")
     assert captured["accept_downloads"] is False
+
+
+def _counting_playwright(monkeypatch) -> dict:
+    """Fake Playwright that counts launches and stops, so tests can see how many browsers a scan started."""
+    import playwright.async_api as pw
+
+    counts = {"launch": 0, "stop": 0}
+
+    class _Context:
+        async def add_init_script(self, *a):
+            return None
+
+        async def close(self):
+            return None
+
+    class _Browser:
+        async def new_context(self, **kwargs):
+            return _Context()
+
+        async def close(self):
+            return None
+
+    class _Chromium:
+        async def launch(self, **kwargs):
+            counts["launch"] += 1
+            return _Browser()
+
+    class _Playwright:
+        chromium = _Chromium()
+
+        async def stop(self):
+            counts["stop"] += 1
+
+    class _Manager:
+        async def start(self):
+            return _Playwright()
+
+    monkeypatch.setattr(pw, "async_playwright", lambda: _Manager())
+    return counts
+
+
+async def test_scan_browser_starts_one_chromium_for_all_its_contexts(monkeypatch):
+    counts = _counting_playwright(monkeypatch)
+    async with browser.scan_browser():
+        async with browser.browser_context():
+            pass
+        async with browser.browser_context():
+            pass
+    assert counts == {"launch": 1, "stop": 1}
+
+
+async def test_scan_without_a_browser_starts_none(monkeypatch):
+    counts = _counting_playwright(monkeypatch)
+    async with browser.scan_browser():
+        pass
+    assert counts == {"launch": 0, "stop": 0}
+
+
+async def test_context_outside_a_scan_gets_its_own_browser(monkeypatch):
+    counts = _counting_playwright(monkeypatch)
+    async with browser.browser_context():
+        pass
+    assert counts == {"launch": 1, "stop": 1}
+
+
+async def test_sources_starting_together_launch_one_chromium(monkeypatch):
+    import asyncio
+
+    counts = _counting_playwright(monkeypatch)
+
+    async def _use():
+        async with browser.browser_context():
+            await asyncio.sleep(0)
+
+    async with browser.scan_browser():
+        await asyncio.gather(_use(), _use(), _use())
+    assert counts == {"launch": 1, "stop": 1}

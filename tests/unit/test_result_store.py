@@ -14,9 +14,7 @@ from app.api.models import (
 from app.storage.result_store import (
     delete_scan,
     ensure_scan_dir,
-    list_scan_ids,
     read_result,
-    result_exists,
     write_result,
 )
 
@@ -42,7 +40,7 @@ def test_write_and_read_result(tmp_path: Path, monkeypatch):
     report = _make_report()
     ensure_scan_dir(report.scan_id)
     write_result(report)
-    assert result_exists(report.scan_id)
+    assert read_result(report.scan_id) is not None
     loaded = read_result(report.scan_id)
     assert loaded is not None
     assert loaded.scan_id == report.scan_id
@@ -73,11 +71,11 @@ def test_delete_scan(tmp_path: Path, monkeypatch):
     report = _make_report()
     ensure_scan_dir(report.scan_id)
     write_result(report)
-    assert result_exists(report.scan_id)
+    assert read_result(report.scan_id) is not None
 
     deleted = delete_scan(report.scan_id)
     assert deleted is True
-    assert not result_exists(report.scan_id)
+    assert read_result(report.scan_id) is None
 
 
 def test_delete_nonexistent_returns_false(tmp_path: Path, monkeypatch):
@@ -97,7 +95,7 @@ def test_read_corrupt_returns_none(tmp_path: Path, monkeypatch):
 
     scan_id = "scn_corrupt"
     ensure_scan_dir(scan_id)
-    out = s.scan_output_path(scan_id)
+    out = s.scan_result_dir(scan_id) / "output.json"
     out.write_text("not valid json}")
 
     result = read_result(scan_id)
@@ -105,17 +103,3 @@ def test_read_corrupt_returns_none(tmp_path: Path, monkeypatch):
     # Corrupt file should be quarantined
     quarantine = out.with_suffix(".corrupt")
     assert quarantine.exists()
-
-
-def test_list_scan_ids(tmp_path: Path, monkeypatch):
-    from app.config import settings as settings_module
-    s = settings_module.get_settings()
-    monkeypatch.setattr(s, "data_dir", tmp_path / "data")
-    (tmp_path / "data" / "results").mkdir(parents=True)
-
-    for i in range(3):
-        ensure_scan_dir(f"scn_id{i}")
-
-    ids = list_scan_ids()
-    assert len(ids) == 3
-    assert all(sid.startswith("scn_id") for sid in ids)

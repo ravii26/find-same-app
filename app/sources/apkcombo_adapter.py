@@ -7,7 +7,6 @@ Auth: None
 
 from __future__ import annotations
 
-import datetime
 import hashlib
 import logging
 import re
@@ -16,17 +15,14 @@ from urllib.parse import quote_plus
 from selectolax.lexbor import LexborHTMLParser as HTMLParser
 
 from app.api.models import (
-    FoundVia,
     Hit,
-    HitType,
-    HostInfo,
     ScanContext,
     SourceMethod,
     SourceStatus,
 )
 from app.services.keyword_expansion import fold_homoglyphs
-from app.sources.base import SourceAdapter, pkg_queries
-from app.utils.browser import hits_with_browser_fallback
+from app.sources.base import SourceAdapter, brand_words, pkg_queries, scraped_hit
+from app.utils.browser import hits_from_browser
 from app.utils.http_client import BlockedError, FetchError
 
 log = logging.getLogger(__name__)
@@ -48,7 +44,7 @@ class APKComboAdapter(SourceAdapter):
 
     async def search(self, ctx: ScanContext) -> tuple[list[Hit], SourceStatus]:
         brand = ctx.request.brand_name
-        brand_tokens = {t.lower() for t in fold_homoglyphs(brand).split() if len(t) >= 3}
+        brand_tokens = brand_words(brand)
 
         queries = pkg_queries(ctx)
 
@@ -59,10 +55,9 @@ class APKComboAdapter(SourceAdapter):
         for q in queries[:2]:
             url = _SEARCH.format(q=quote_plus(q))
             try:
-                hits.extend(await hits_with_browser_fallback(
+                hits.extend(await hits_from_browser(
                     url,
                     lambda html, q=q: self._parse(html, q, brand_tokens, seen),
-                    rotate_ua=True,
                 ))
             except BlockedError as e:
                 return hits, SourceStatus(
@@ -148,22 +143,16 @@ class APKComboAdapter(SourceAdapter):
                     if publisher:
                         break
 
-            hits.append(Hit(
-                id=uid,
-                type=HitType.app_listing,
+            hits.append(scraped_hit(
+                self,
+                query,
+                url=full_url,
+                host_name="APKCombo",
+                host_domain="apkcombo.com",
+                hit_id=uid,
                 app_name=name,
                 package_id=pkg_id,
                 publisher=publisher,
-                url=full_url,
-                host=HostInfo(
-                    group=self.host_group,
-                    name="APKCombo",
-                    domain="apkcombo.com",
-                    is_official_store=False,
-                ),
-                found_via=[FoundVia(source=self.name, method=self.method, query=query)],
-                relevance_score=0,
-                discovered_at=datetime.datetime.now(datetime.timezone.utc),
             ))
 
         return hits

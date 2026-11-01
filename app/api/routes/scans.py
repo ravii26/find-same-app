@@ -4,25 +4,18 @@
 from __future__ import annotations
 
 import asyncio
-import datetime
 from typing import Annotated
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
-from ulid import ULID
 
 from app.api.middleware.auth import require_api_key
 from app.api.models import ScanCreate, ScanRequest, ScanStatus
-from app.config.settings import get_settings
-from app.jobs.actors import promote_pending
-from app.services import discovery
-from app.storage import brand_index
-from app.storage import result_store, scan_log, status_store
+from app.services import discovery, scan_queue
+from app.storage import brand_index, result_store, status_store
 
 router = APIRouter(prefix="/v1", tags=["scans"])
-
-_ACTIVE = (ScanStatus.queued, ScanStatus.running)
 
 
 def _scan_id(scan_id: str) -> str:
@@ -79,7 +72,6 @@ async def create_scan(
 ):
     """Queue a scan. An identical request (same dedup_hash) that is still queued or
     running returns that scan instead of starting a second one."""
-    settings = get_settings()
     redis = _redis(request)
     submitted = payload.model_dump(mode="json")
     body = ScanRequest(brand_name=payload.brand_name)
@@ -96,26 +88,10 @@ async def create_scan(
         body = brand_index.merge_into_request(body, details, own_apps)
     body = body.model_copy(update={"submitted": submitted})
 
-    in_flight = await status_store.running_count(redis) + await status_store.pending_count(redis)
-    if in_flight >= settings.max_queue_depth:
-        raise HTTPException(status_code=429, detail="Queue is full", headers={"Retry-After": "60"})
-
-    scan_id = "scn_" + str(ULID())
-    request_hash = body.dedup_hash()
-    holder = await status_store.claim_dedup(redis, request_hash, scan_id)
-    if holder:
-        holder_status = await status_store.get_status(redis, holder)
-        if holder_status in _ACTIVE:
-            return _queued(holder)
-        await status_store.replace_dedup(redis, request_hash, scan_id)  # previous scan is finished
-
-    result_store.ensure_scan_dir(scan_id)
-    scan_log.append_sync(settings.scan_log_path(scan_id), scan_id, "INFO", "scan accepted")
-    now = datetime.datetime.now(datetime.timezone.utc)
-    await status_store.set_status(redis, scan_id, ScanStatus.queued)
-    await status_store.set_meta(redis, scan_id, brand_name=body.brand_name, created_at=now)
-    await status_store.add_pending(redis, scan_id, {**body.model_dump(), "submitted": submitted})
-    await promote_pending(redis)  # starts it right away if a slot is free
+    try:
+        scan_id = await scan_queue.submit(redis, body, submitted)
+    except scan_queue.QueueFull:
+        raise HTTPException(status_code=429, detail="Queue is full", headers={"Retry-After": "60"}) from None
     return _queued(scan_id)
 
 
@@ -138,7 +114,7 @@ async def get_progress(
             raise HTTPException(status_code=404, detail="Scan not found")
         s = ScanStatus(report.status or ScanStatus.completed.value)
 
-    meta = await status_store.get_meta(redis, scan_id) or result_store.read_meta(scan_id) or {}
+    meta = await status_store.get_meta(redis, scan_id) or {}
     total_sources = len(get_all_adapters())
     sources = await status_store.get_sources(redis, scan_id)
     base = {
@@ -169,7 +145,7 @@ async def get_progress(
         })
 
     # Finished — derive status and return progress shape only (no results)
-    # Finished: report the status the scan recorded, the same one the report and the webhook carry.
+    # Finished: report the status the scan recorded, the same one the report carries.
     # (Deriving it from source counts gave "partial" and "completed" for scans the report marks otherwise.)
     report = report or result_store.read_result(scan_id)
     if report is not None:

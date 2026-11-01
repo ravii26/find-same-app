@@ -13,17 +13,13 @@ Auth: None
 
 from __future__ import annotations
 
-import datetime
 import hashlib
 import logging
 import re
 from urllib.parse import quote
 
 from app.api.models import (
-    FoundVia,
     Hit,
-    HitType,
-    HostInfo,
     ScanContext,
     SourceMethod,
     SourceStatus,
@@ -31,31 +27,23 @@ from app.api.models import (
 from app.services.keyword_expansion import fold_homoglyphs
 from app.sources.base import (
     SourceAdapter,
+    brand_words,
     is_network_block,
     page_problem,
     pkg_queries,
     says_no_results,
     scrape_status,
+    scraped_hit,
 )
-
+from app.utils.browser import browser_context
 from app.utils.http_client import throttle
 
 log = logging.getLogger(__name__)
 
-try:
-    from playwright.async_api import async_playwright as _async_playwright
-    _PLAYWRIGHT_OK = True
-except ImportError:
-    _async_playwright = None  # type: ignore[assignment]
-    _PLAYWRIGHT_OK = False
 
 _BASE = "https://en.softonic.com"
 _SEARCH = _BASE + "/s/{q}:android"
 
-_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-)
 
 # App pages live on a per-app subdomain: https://whatsapp.en.softonic.com/android
 _APP_URL_RE = re.compile(r"^https://([a-z0-9-]+)\.en\.softonic\.com/android/?$")
@@ -97,14 +85,8 @@ class SoftonicAdapter(SourceAdapter):
     host_group = "apk_site"
 
     async def search(self, ctx: ScanContext) -> tuple[list[Hit], SourceStatus]:
-        if not _PLAYWRIGHT_OK:
-            return [], SourceStatus(
-                name=self.name, method=self.method, status="failed",
-                error="playwright not installed — run: pip install playwright && playwright install chromium",
-            )
-
         brand = ctx.request.brand_name
-        brand_tokens = {t.lower() for t in fold_homoglyphs(brand).split() if len(t) >= 3}
+        brand_tokens = brand_words(brand)
 
         hits: list[Hit] = []
         seen: set[str] = set()
@@ -112,22 +94,7 @@ class SoftonicAdapter(SourceAdapter):
         blocked: list[str] = []
 
         try:
-            async with _async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=["--no-sandbox", "--disable-dev-shm-usage",
-                          "--disable-gpu", "--no-zygote",
-                          "--disable-blink-features=AutomationControlled"],
-                )
-                bctx = await browser.new_context(
-                    accept_downloads=False,
-                    user_agent=_UA,
-                    viewport={"width": 1280, "height": 900},
-                    locale="en-US",
-                )
-                await bctx.add_init_script(
-                    "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
-                )
+            async with browser_context() as bctx:
 
                 for q in pkg_queries(ctx)[:2]:
                     page = await bctx.new_page()
@@ -172,22 +139,15 @@ class SoftonicAdapter(SourceAdapter):
                             if uid in seen:
                                 continue
                             seen.add(uid)
-                            hits.append(Hit(
-                                id=uid,
-                                type=HitType.app_listing,
-                                app_name=r["name"],
-                                package_id=None,
-                                icon_url=r["icon_url"],
+                            hits.append(scraped_hit(
+                                self,
+                                q,
                                 url=r["url"],
-                                host=HostInfo(
-                                    group=self.host_group,
-                                    name="Softonic",
-                                    domain="softonic.com",
-                                    is_official_store=False,
-                                ),
-                                found_via=[FoundVia(source=self.name, method=self.method, query=q)],
-                                relevance_score=0,
-                                discovered_at=datetime.datetime.now(datetime.timezone.utc),
+                                host_name="Softonic",
+                                host_domain="softonic.com",
+                                hit_id=uid,
+                                app_name=r["name"],
+                                icon_url=r["icon_url"],
                             ))
 
                     except Exception as e:
@@ -196,7 +156,6 @@ class SoftonicAdapter(SourceAdapter):
                     finally:
                         await page.close()
 
-                await browser.close()
 
         except Exception as exc:
             log.warning("softonic: scrape failed: %s", exc)

@@ -16,7 +16,6 @@ import time
 
 import redis.asyncio as aioredis
 
-
 # Rates in requests-per-second. Values < 1.0 express a crawl-delay:
 #   0.5  → 1 req / 2s
 _DEFAULT_LIMITS: dict[str, float] = {

@@ -15,7 +15,6 @@ APKMirror is valuable for rogue detection because:
 
 from __future__ import annotations
 
-import datetime
 import hashlib
 import logging
 import re
@@ -23,16 +22,20 @@ import xml.etree.ElementTree as ET
 from urllib.parse import quote_plus
 
 from app.api.models import (
-    FoundVia,
     Hit,
-    HitType,
-    HostInfo,
     ScanContext,
     SourceMethod,
     SourceStatus,
 )
 from app.services.keyword_expansion import fold_homoglyphs
-from app.sources.base import SourceAdapter, page_problem, pkg_queries, scrape_status
+from app.sources.base import (
+    SourceAdapter,
+    brand_words,
+    page_problem,
+    pkg_queries,
+    scrape_status,
+    scraped_hit,
+)
 from app.utils.http_client import BlockedError, FetchError, decode_response, fetch
 
 log = logging.getLogger(__name__)
@@ -58,7 +61,7 @@ class APKMirrorAdapter(SourceAdapter):
 
     async def search(self, ctx: ScanContext) -> tuple[list[Hit], SourceStatus]:
         brand = ctx.request.brand_name
-        brand_tokens = {t.lower() for t in fold_homoglyphs(brand).split() if len(t) >= 3}
+        brand_tokens = brand_words(brand)
 
         queries = pkg_queries(ctx)
 
@@ -126,22 +129,16 @@ class APKMirrorAdapter(SourceAdapter):
             creator_el = item.find("{http://purl.org/dc/elements/1.1/}creator")
             publisher = (creator_el.text or "").strip() or None
 
-            hits.append(Hit(
-                id=uid,
-                type=HitType.app_listing,
+            hits.append(scraped_hit(
+                self,
+                query,
+                url=link,
+                host_name="APKMirror",
+                host_domain="apkmirror.com",
+                hit_id=uid,
                 app_name=name_clean,
                 package_id=pkg_slug,
                 publisher=publisher,
-                url=link,
-                host=HostInfo(
-                    group=self.host_group,
-                    name="APKMirror",
-                    domain="apkmirror.com",
-                    is_official_store=False,
-                ),
-                found_via=[FoundVia(source=self.name, method=self.method, query=query)],
-                relevance_score=0,
-                discovered_at=datetime.datetime.now(datetime.timezone.utc),
             ))
 
         return hits

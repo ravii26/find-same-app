@@ -36,3 +36,5 @@ indus_appstore_results.json
 
 # Local Claude Code settings (shared settings in .claude/settings.json stay tracked)
 .claude/settings.local.json
+
+docs/

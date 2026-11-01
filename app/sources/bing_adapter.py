@@ -30,9 +30,8 @@ from app.api.models import (
     SourceStatus,
 )
 from app.config import phrases
-from app.services.keyword_expansion import fold_homoglyphs
-from app.sources.base import SourceAdapter, country_label, scan_countries
-from app.utils.browser import hits_with_browser_fallback
+from app.sources.base import SourceAdapter, brand_words, country_label, scan_countries
+from app.utils.browser import hits_from_browser
 from app.utils.http_client import BlockedError, FetchError
 
 log = logging.getLogger(__name__)
@@ -72,7 +71,7 @@ class BingAdapter(SourceAdapter):
 
     async def search(self, ctx: ScanContext) -> tuple[list[Hit], SourceStatus]:
         brand = ctx.request.brand_name
-        brand_tokens = {t.lower() for t in fold_homoglyphs(brand).split() if len(t) >= 3}
+        brand_tokens = brand_words(brand)
         official_domain = (ctx.request.official_domain or "").lower().strip()
 
         skip_domains = set(_SKIP_DOMAINS)
@@ -100,11 +99,9 @@ class BingAdapter(SourceAdapter):
             url = _SEARCH.format(q=quote_plus(q), cc=cc)
             label = country_label(q, cc, countries)
             try:
-                hits.extend(await hits_with_browser_fallback(
+                hits.extend(await hits_from_browser(
                     url,
                     lambda html, label=label: self._parse(html, label, brand_tokens, skip_domains, seen),
-                    rotate_ua=True,
-                    headers={"Accept-Language": "en-US,en;q=0.9"},
                 ))
             except BlockedError as e:
                 return hits, SourceStatus(
@@ -206,7 +203,7 @@ class BingAdapter(SourceAdapter):
                         FoundVia(source=self.name, method=self.method, query=query)
                     ],
                     relevance_score=0,
-                    discovered_at=datetime.datetime.now(datetime.timezone.utc),
+                    discovered_at=datetime.datetime.now(datetime.UTC),
                 )
             )
 

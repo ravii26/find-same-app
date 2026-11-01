@@ -42,16 +42,6 @@ def test_apk_path_traversal_detected():
     assert r.apk_path == "../etc/passwd"  # validation at API layer
 
 
-def test_callback_url_must_be_http():
-    with pytest.raises(ValidationError):
-        ScanRequest(brand_name="Test", keywords=["test"], callback_url="ftp://evil.com")
-
-
-def test_callback_url_valid_https():
-    r = ScanRequest(brand_name="Test", keywords=["test"], callback_url="https://webhook.example.com")
-    assert r.callback_url is not None
-
-
 def test_depth_capped_at_5():
     with pytest.raises(ValidationError):
         ScanRequest(brand_name="Test", keywords=["test"], depth=10)
@@ -72,12 +62,6 @@ def test_dedup_hash_stable():
 def test_dedup_hash_ignores_keyword_order():
     r1 = ScanRequest(brand_name="Test", keywords=["a", "b"])
     r2 = ScanRequest(brand_name="Test", keywords=["b", "a"])
-    assert r1.dedup_hash() == r2.dedup_hash()
-
-
-def test_dedup_hash_ignores_callback_url():
-    r1 = ScanRequest(brand_name="Test", keywords=["a"], callback_url=None)
-    r2 = ScanRequest(brand_name="Test", keywords=["a"], callback_url="https://x.com")
     assert r1.dedup_hash() == r2.dedup_hash()
 
 

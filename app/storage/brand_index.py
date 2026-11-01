@@ -11,12 +11,11 @@ from __future__ import annotations
 import datetime
 from typing import Any
 
-from elasticsearch import BadRequestError, ConflictError, NotFoundError
+from elasticsearch import BadRequestError, ConflictError, NotFoundError, TransportError
 from elasticsearch import ConnectionError as ESConnectionError
-from elasticsearch import TransportError
 
-from app.config.settings import Settings, get_settings
 from app.api.models import ScanRequest
+from app.config.settings import Settings, get_settings
 from app.storage import es_store
 
 BRAND_MAPPING: dict[str, Any] = {
@@ -57,7 +56,7 @@ def name_key(name: str) -> str:
 
 
 def _now() -> str:
-    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+    return datetime.datetime.now(datetime.UTC).isoformat()
 
 
 async def _ensure_index(client: Any, index: str) -> None:

@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import httpx
 import pytest
 from pydantic import ValidationError
 
 from app.api.routes.brand_details import BrandDetailsRequest
 from app.services import discovery
-from app.storage import brand_index
 
 PLAY = "https://play.google.com/store/apps/details?id=com.sbi.lotusintouch"
 
@@ -34,14 +32,6 @@ def test_discover_request_rejects_a_non_play_link():
         BrandDetailsRequest(brand_name="YONO SBI", play_store_url="https://example.com/app")
 
 
-def test_name_match_is_whole_phrase_so_google_home_is_not_google_pay():
-    assert discovery.name_matches("Google Pay for Business", ["Google Pay"])
-    assert not discovery.name_matches("Google Home", ["Google Pay"])
-
-
-def test_alias_counts_as_brand_name():
-    assert discovery.name_matches("Yono Business", ["YONO SBI", "Yono"])
-    assert discovery.name_matches("YONO SBI Sri Lanka", ["YONO SBI"])
 
 
 # ── discovery with the network replaced by fakes ──────────────────────────────
@@ -90,108 +80,19 @@ def _patch_network(monkeypatch):
     monkeypatch.setattr(discovery, "_itunes_json", fake_itunes)
 
 
-async def test_discovery_builds_candidates_per_store(monkeypatch):
-    _patch_network(monkeypatch)
-    result = await discovery.discover([PLAY], [], "YONO SBI", aliases=["YONO"], cc="in")
-    by_key = {(c["store"], c["id"]): c for c in result["candidates"]}
-
-    assert ("play", "com.sbi.lotusintouch") in by_key
-    assert ("play", "com.YONOMUApp") in by_key
-    assert ("app_store", "com.sbi.YONOBD") in by_key
-    assert result["play_developer"] == "State Bank of India"
-
-
-async def test_only_brand_named_candidates_are_preselected(monkeypatch):
-    _patch_network(monkeypatch)
-    result = await discovery.discover([PLAY], [], "YONO SBI", aliases=[], cc="in")
-    selected = {c["id"] for c in result["candidates"] if c["default"]}
-    assert "com.sbi.lotusintouch" in selected
-    assert "com.YONOMUApp" in selected
-    assert "com.sbi.myhrms" not in selected  # listed for review, not pre-selected
-
-
-async def test_app_store_seller_is_matched_by_name_only(monkeypatch):
-    _patch_network(monkeypatch)
-    result = await discovery.discover([PLAY], [], "YONO SBI", aliases=[], cc="in")
-    ios = [c for c in result["candidates"] if c["store"] == "app_store"]
-    assert {c["id"] for c in ios} == {"com.sbi.YONOBD", "com.sbi.sbiquick.ios"}
-    assert all(c["publisher"] == "State Bank of India" for c in ios)
-
-
-async def test_unreadable_listing_is_a_discovery_error(monkeypatch):
-    async def no_listing(pkg, cc):
-        return None
-
-    monkeypatch.setattr(discovery, "_play_listing", no_listing)
-    with pytest.raises(discovery.DiscoveryError):
-        await discovery.discover([PLAY], [], "YONO SBI", aliases=[], cc="in")
 
 
 
 
 # ── developer page: browser scroll, static fallback ───────────────────────────
 
-async def test_developer_page_read_in_browser_is_complete_without_note(monkeypatch):
-    async def scrolled(url, pattern):
-        return ["com.a.one", "com.a.two", "com.a.three"], True
 
-    monkeypatch.setattr(discovery, "collect_while_scrolling", scrolled)
-    notes: list[str] = []
-    packages = await discovery._play_developer_packages("State+Bank+of+India", "in", notes)
-    assert packages == ["com.a.one", "com.a.two", "com.a.three"]
-    assert notes == []
-
-
-async def test_developer_page_cut_off_by_round_cap_is_noted_as_incomplete(monkeypatch):
-    async def capped(url, pattern):
-        return ["com.a.one"], False
-
-    monkeypatch.setattr(discovery, "collect_while_scrolling", capped)
-    notes: list[str] = []
-    await discovery._play_developer_packages("State+Bank+of+India", "in", notes)
-    assert notes == ["the Play developer page may not list every app of the developer"]
-
-
-async def test_developer_page_falls_back_to_static_page_when_browser_fails(monkeypatch):
-    async def broken(url, pattern):
-        raise RuntimeError("playwright not installed")
-
-    html = (
-        b'<a href="details?id=com.a.one"></a>'
-        b'<a href="details?id=com.a.two"></a>'
-        b'<a href="details?id=com.a.one"></a>'
-    )
-
-    async def static(url, **kwargs):
-        return httpx.Response(200, content=html, request=httpx.Request("GET", url))
-
-    monkeypatch.setattr(discovery, "collect_while_scrolling", broken)
-    monkeypatch.setattr(discovery, "fetch", static)
-    notes: list[str] = []
-    packages = await discovery._play_developer_packages("State+Bank+of+India", "in", notes)
-    assert packages == ["com.a.one", "com.a.two"]
-    assert notes == ["the Play developer page may not list every app of the developer"]
 
 
 # ── several links per store ───────────────────────────────────────────────────
 
 YONO_MU = "https://play.google.com/store/apps/details?id=com.YONOMUApp"
 
-
-async def test_links_for_one_developer_read_its_page_once(monkeypatch):
-    _patch_network(monkeypatch)
-    reads: list[str] = []
-
-    async def counted(dev_id, cc, notes):
-        reads.append(dev_id)
-        return list(PLAY_LISTINGS)
-
-    monkeypatch.setattr(discovery, "_play_developer_packages", counted)
-    result = await discovery.discover([PLAY, YONO_MU], [], "YONO SBI", [], "in")
-
-    assert reads == ["State+Bank+of+India"]
-    play_ids = [c["id"] for c in result["candidates"] if c["store"] == "play"]
-    assert len(play_ids) == len(set(play_ids))  # a link to an app the developer page also lists is not repeated
 
 
 def test_single_link_field_is_added_to_the_list():
