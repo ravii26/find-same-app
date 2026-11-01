@@ -89,7 +89,9 @@ class GetAppsAdapter(SourceAdapter):
                             title=item.get("displayName"),
                             app_name=item.get("displayName"),
                             package_id=pkg,
-                            publisher=item.get("developerName"),
+                            # publisherName is the GetApps account that lists the app ("Aptoide" for apps GetApps
+                            # re-hosts from Aptoide); developerName is only sometimes present
+                            publisher=item.get("publisherName") or item.get("developerName"),
                             icon_url=icon_url,
                             url=listing_url,
                             host=HostInfo(
