@@ -2,6 +2,7 @@
 """Brand details (Elasticsearch): create, read, update and delete.
 
   POST   /v1/brand-details           create (201, "Brand added"); 409 if a brand with this name exists
+  GET    /v1/brand-details           list every brand, sorted by name (?page=1&size=50, size up to 100)
   GET    /v1/brand-details/{brand}   read by brand name
   PUT    /v1/brand-details/{brand}   replace the details; 409 if the new name is taken
   DELETE /v1/brand-details/{brand}   delete by brand name
@@ -14,7 +15,7 @@ from __future__ import annotations
 import re
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.api.middleware.auth import require_api_key
@@ -144,6 +145,25 @@ async def create_brand_details(body: BrandDetailsRequest, _: Annotated[str, Depe
     except (brand_index.BrandExists, brand_index.BrandIndexUnavailable) as exc:
         raise _http(exc) from exc
     return {"brand_name": doc["brand_name"], "message": "Brand added"}
+
+
+_MAX_PAGE_SIZE = 100
+_MAX_WINDOW = 10_000  # Elasticsearch's default limit on page * size (index.max_result_window)
+
+
+@router.get("", response_model=None)
+async def list_brand_details(
+    _: Annotated[str, Depends(require_api_key)],
+    page: Annotated[int, Query(ge=1)] = 1,
+    size: Annotated[int, Query(ge=1, le=_MAX_PAGE_SIZE)] = 50,
+):
+    if page * size > _MAX_WINDOW:
+        raise HTTPException(status_code=422, detail=f"page * size must be at most {_MAX_WINDOW}")
+    try:
+        found = await brand_index.list_all(page, size)
+    except brand_index.BrandIndexUnavailable as exc:
+        raise _http(exc) from exc
+    return {"total": found["total"], "page": page, "size": size, "brands": found["brands"]}
 
 
 @router.get("/{brand}", response_model=None)

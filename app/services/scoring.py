@@ -22,7 +22,7 @@ from rapidfuzz import fuzz
 
 from app.api.models import Hit, HitType, ScanRequest
 from app.config.phrases import word_regex
-from app.services.brand_match import exact_in, presence, presence_any
+from app.services.brand_match import compact, exact_in, is_brand_name, presence, presence_any
 from app.services.keyword_expansion import fold_homoglyphs
 from app.utils.url_tools import decode_idn, registrable_domain
 
@@ -59,6 +59,9 @@ _LURE_RE = word_regex("lure_words")
 
 # Vocabulary of banking/payment scams: the file or page is named for the *lure*, not just the brand.
 _SCAM_RE = word_regex("scam_words")
+
+# Mod/hack/coupon wording: next to the brand name it ties an app to the brand ("Coupon Codes for Zomato").
+_BAIT_RE = word_regex("bait_words")
 
 # Shared hosting platforms: a brand name in a *subdomain* here is not the brand's own site.
 _FREE_HOSTING = (
@@ -485,14 +488,30 @@ async def _enrich_permission_similarity(
 # brand's common word ("Bob") carry only the name, and that is what floods the report.
 _ICON_MATCH = 0.80   # same pHash level that earns the icon bonus
 _APP_ID_MATCH = 0.85
+# Aliases this short ("BOB") are also everyday words and names, so an app named after one claims nothing
+_MIN_ALIAS_LEN = 4
+
+
+def _claims_the_brand(hit: Hit, request: ScanRequest) -> bool:
+    """An app listing that presents itself as the brand: it is named the brand ("Zomato" by another publisher), or
+    pairs the brand with scam, mod or coupon wording ("Free Coupon Codes for Zomato"). Impersonators copy only the
+    name, so their publisher, app id and icon are their own and the other evidence never fires for them.
+    "Bob World: Super Bro Run Game" only contains the brand and claims neither."""
+    name = hit.app_name or hit.title
+    if hit.type != HitType.app_listing or not name:
+        return False
+    brands = [request.brand_name, *(a for a in request.brand_aliases if len(compact(a)) >= _MIN_ALIAS_LEN)]
+    if any(is_brand_name(b, name) for b in brands):
+        return True
+    return bool(_BAIT_RE.search(name) or _SCAM_RE.search(name)) and any(exact_in(b, name) for b in brands)
 
 
 def _has_evidence_beyond_name(hit: Hit, request: ScanRequest, official_publishers: set[str] | frozenset[str]) -> bool:
-    """Publisher, app id, official domain, or a close icon. A description is not used: for a common brand word
-    it only repeats the name ("Bob HR" describes itself as "Bob's mobile app")."""
+    """Publisher, app id, official domain, a close icon, or the app claims to be the brand. A description is not
+    used: for a common brand word it only repeats the name ("Bob HR" describes itself as "Bob's mobile app")."""
     from app.services.allowlist import _norm_publisher
 
-    if hit.is_official_match:
+    if hit.is_official_match or _claims_the_brand(hit, request):
         return True
     if hit.publisher and _norm_publisher(hit.publisher) in official_publishers:
         return True
@@ -514,7 +533,10 @@ def _gate_name_only(hit: Hit, request: ScanRequest, official_publishers: set[str
         return hit
     return hit.model_copy(update={
         "relevance_score": min(hit.relevance_score, min_relevance_for(hit) - 1),
-        "reasons": hit.reasons + ["no evidence beyond the name: publisher, app id, official domain, icon or description"],
+        "reasons": hit.reasons + [
+            "no evidence beyond the name: no brand publisher, similar app id, official domain or similar icon, "
+            "and the app is neither named the brand nor pairs it with scam or mod wording"
+        ],
     })
 
 

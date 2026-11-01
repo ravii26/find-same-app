@@ -8,6 +8,8 @@
 #   lure_suffixes  appended to the brand to make search keywords ("<brand> <suffix>")
 #   lure_words     words in an app/page title that suggest a mod/cracked/free distribution (scoring)
 #   scam_words     banking/payment scam vocabulary next to a brand match (scoring)
+#   bait_words     mod/hack/coupon wording that, next to the brand name, ties an app to the brand without other
+#                  evidence (scoring); everyday words like "free" or "pro" do not belong here
 #   search_queries Bing queries, "{brand}" is replaced by the brand name
 #
 # Add a language by adding a pack and listing its countries under markets. No code change is needed.
@@ -28,6 +30,7 @@ default:
     - hack
     - cheats
   lure_words: [mod, cracked, premium, free, hack, cheat, cheats, unlocked, pro, lite]
+  bait_words: [mod, cracked, hack, hacked, cheat, cheats, unlocked, coupon, coupons, promo code, voucher, vouchers]
   scam_words:
     - reward
     - rewards
@@ -76,18 +79,21 @@ packs:
   russian:
     lure_suffixes: [скачать, скачать apk, мод, взлом, последняя версия, бесплатно, без рекламы]
     lure_words: [скачать, мод, взлом, бесплатно, premium, крякнутый]
+    bait_words: [мод, взлом, крякнутый, промокод]
     scam_words: [бонус, выигрыш, подтвердить, обновление, заблокирован, вход, кэшбэк, кредит, займ, возврат]
     search_queries: ["{brand} скачать apk", "{brand} мод apk"]
 
   portuguese:
     lure_suffixes: [baixar, baixar apk, grátis, atualizado, versão antiga, hackeado, dinheiro infinito]
     lure_words: [baixar, grátis, hackeado, atualizado, infinito]
+    bait_words: [hackeado, cupom, cupons]
     scam_words: [bônus, prêmio, verificar, atualizar, bloqueado, entrar, reembolso, empréstimo]
     search_queries: ["{brand} baixar apk", "{brand} apk grátis"]
 
   spanish:
     lure_suffixes: [descargar, descargar apk, gratis, hackeado, última versión, versión antigua, premium gratis]
     lure_words: [descargar, gratis, hackeado, premium]
+    bait_words: [hackeado, cupón, cupones]
     scam_words: [bono, premio, verificar, actualizar, bloqueado, iniciar sesión, reembolso, préstamo]
     search_queries: ["{brand} descargar apk", "{brand} apk gratis"]
 
@@ -106,18 +112,21 @@ packs:
   montenegrin:         # Montenegrin/Serbian/Bosnian/Croatian, Latin script (Montenegro)
     lure_suffixes: [preuzmi, preuzmi apk, besplatno, hakovan, mod apk, najnovija verzija, kredit, nagrada]
     lure_words: [preuzmi, besplatno, hakovan, nagrada, kredit]
+    bait_words: [hakovan]
     scam_words: [bonus, nagrada, potvrda, ažuriranje, blokiran, prijava, povrat novca, kredit, zamrznut račun]
     search_queries: ["{brand} preuzmi apk", "{brand} apk besplatno"]
 
   arabic:
     lure_suffixes: [تحميل, تنزيل, مهكر, مجانا, اخر اصدار]
     lure_words: [تحميل, تنزيل, مهكر, مجانا]
+    bait_words: [مهكر]
     scam_words: [مكافأة, تحقق, تحديث, محظور, تسجيل الدخول, استرداد, قرض]
     search_queries: ["تحميل {brand} apk", "{brand} مهكر"]
 
   turkish:
     lure_suffixes: [indir, apk indir, hileli, ücretsiz, son sürüm]
     lure_words: [indir, hileli, ücretsiz]
+    bait_words: [hileli]
     scam_words: [bonus, ödül, doğrula, güncelle, engellendi, giriş, iade, kredi]
     search_queries: ["{brand} apk indir", "{brand} hileli apk"]
 

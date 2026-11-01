@@ -142,6 +142,20 @@ The brand is stored in Elasticsearch (`rogue-brands`), and the brand name is its
 `/v1/brand-details/{brand_name}` read, replace and remove it. A `PUT` that renames the brand to a name another brand
 already has returns 409 and changes nothing. An unknown name returns 404. Without Elasticsearch these calls return 503.
 
+`GET /v1/brand-details` lists every stored brand, sorted by name, with the same details as a read by name:
+
+```http
+GET /v1/brand-details?page=1&size=50
+X-API-Key: <key>
+```
+
+```json
+{"total": 3, "page": 1, "size": 50, "brands": [{"brand_name": "Bank of Baroda", "...": "..."}, ...]}
+```
+
+`size` is 1 to 100 (default 50) and `page` starts at 1. A page past the last brand returns an empty `brands` list.
+`page * size` above 10,000 returns 422 (Elasticsearch's result window).
+
 ### Step 2: start a scan
 
 ```http
@@ -159,8 +173,9 @@ stored record. A brand is found by its name, in any case.
 
 **What happens before the scan runs**
 
-1. The API reads the stored brand by name. A name with no stored brand still runs, as a name-only scan. Elasticsearch
-   unreachable: 503.
+1. The API reads the stored brand by name. A name with no stored brand still runs, as a name-only scan: the 202
+   response and the report carry a `warning`, and only apps named exactly like the brand or pairing it with scam,
+   mod or coupon wording are reported. Elasticsearch unreachable: 503.
 2. Each of the brand's store links is read from its store. A store that cannot be read: 503, so no app is
    allowlisted on a guessed publisher.
 3. The request is saved as sent. This becomes the report's `query`.
@@ -269,7 +284,7 @@ Brand logos are not an input yet. Icon comparison is in the scoring code, but th
 
 Each hit starts at 0. Signals add or subtract points. The score is capped in a few cases. The final value is rounded and clamped to 0 to 100.
 
-Scoring is deterministic. Weights and signal values are in `config/scoring.yaml`. `ruleset_version` is `v9`, and the report carries it as `summary.scoring_ruleset`. Change the ruleset version when weights or signals change.
+Scoring is deterministic. Weights and signal values are in `config/scoring.yaml`. `ruleset_version` is `v10`, and the report carries it as `summary.scoring_ruleset`. Change the ruleset version when weights or signals change.
 
 ### Weights
 
@@ -313,6 +328,18 @@ A weight multiplies a similarity between 0 and 1, then by 100. For example, a pa
 | `unsuspicious_page_cap` | 34 | Lookalike domain page that is parked, blank or neutral |
 
 Brand presence uses the brand name and every alias. The strongest match counts. `YONO` as an alias makes "Yono Rummy Store" an exact match, so the 34 cap does not apply to it.
+
+### Evidence beyond the name
+
+An app listing or code repo is reported only when it has evidence beyond a name match. Otherwise its score is held under the threshold, and it stays in `suppressed` with the reason. Evidence is any of:
+
+- a brand publisher
+- an app id close to an official id (0.85 or more)
+- the official domain
+- an icon similarity of 0.80 or more
+- an app listing that claims the brand: it is named the brand ("Zomato", "Zomato App"), or it pairs the brand with scam, mod or coupon wording ("Free Coupon Codes for Zomato", "Zomato Mod"). The wording is `scam_words` and `bait_words` in `config/phrases.yaml`. Aliases of 3 characters or fewer ("BOB") do not count as a claimed name.
+
+This drops apps that only share a common brand word: for "bob World", "Bob World: Super Bro Run Game" contains the brand but claims nothing. Impersonators copy only the name, so the last rule is what keeps them in the report.
 
 ### Thresholds and risk bands
 
@@ -510,7 +537,7 @@ in `query`.
 | `allowlisted_count` | integer | Length of `allowlisted` |
 | `suppressed_count` | integer | Length of `suppressed` |
 | `duration_ms` | integer | Scan time |
-| `scoring_ruleset` | string | Ruleset version (`v9`) |
+| `scoring_ruleset` | string | Ruleset version (`v10`) |
 
 ### `results[]` (Hit)
 
@@ -644,7 +671,7 @@ Do not wrap `run.py restart` in `timeout`. The timeout kills the processes it st
 **Storage**
 
 - **Elasticsearch is optional, and its failures are silent.** Indexing failures are logged as warnings in the report, and the scan still completes. Results are then only in `output.json` and are not searchable. In the latest run the warning was present because Elasticsearch was not running.
-- **Brands need Elasticsearch.** A scan by brand name returns 503 when Elasticsearch cannot be reached, because the brand's ids and aliases are read from it. A name with no stored brand still runs, but as a name-only scan.
+- **Brands need Elasticsearch.** A scan by brand name returns 503 when Elasticsearch cannot be reached, because the brand's ids and aliases are read from it. A name with no stored brand still runs, but as a name-only scan: with no own apps, publisher or icon to compare, only apps named exactly like the brand or pairing it with scam, mod or coupon wording are reported.
 
 **Scope**
 

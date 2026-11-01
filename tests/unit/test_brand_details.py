@@ -77,6 +77,11 @@ class FakeES:
             raise _not_found()
         del self.docs[id]
 
+    async def search(self, index, query, sort, from_, size, track_total_hits):
+        self._check()
+        docs = sorted(self.docs.values(), key=lambda d: d["brand_name"].lower())  # the script sort ignores case
+        return {"hits": {"total": {"value": len(docs)}, "hits": [{"_source": d} for d in docs[from_:from_ + size]]}}
+
     async def close(self):
         pass
 
@@ -290,3 +295,43 @@ def test_scan_needs_a_brand_name():
     assert ScanRequest(brand_name="YONO SBI").brand_name == "YONO SBI"
     with pytest.raises(ValidationError):
         ScanRequest()
+
+
+# ── GET /v1/brand-details: every brand ────────────────────────────────────────
+
+def test_list_returns_every_brand_sorted_by_name(client):
+    for name in ("Zomato", "bob World", "YONO SBI"):
+        client.post("/v1/brand-details", json={**BODY, "brand_name": name}, headers=KEY)
+    resp = client.get("/v1/brand-details", headers=KEY)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 3 and body["page"] == 1 and body["size"] == 50
+    assert [b["brand_name"] for b in body["brands"]] == ["bob World", "YONO SBI", "Zomato"]  # case is ignored
+    assert body["brands"][1]["keywords"] == ["login"]  # the full stored details, as GET by name returns them
+
+
+def test_list_pages_through_the_brands(client):
+    for name in ("A Bank", "B Bank", "C Bank"):
+        client.post("/v1/brand-details", json={**BODY, "brand_name": name}, headers=KEY)
+    second = client.get("/v1/brand-details?page=2&size=2", headers=KEY).json()
+    assert second["total"] == 3
+    assert [b["brand_name"] for b in second["brands"]] == ["C Bank"]
+    assert client.get("/v1/brand-details?page=3&size=2", headers=KEY).json()["brands"] == []
+
+
+def test_list_with_no_brands_is_empty(client):
+    assert client.get("/v1/brand-details", headers=KEY).json() == {"total": 0, "page": 1, "size": 50, "brands": []}
+
+
+@pytest.mark.parametrize("query", ["page=0", "size=0", "size=101", "page=101&size=100"])
+def test_list_refuses_a_page_out_of_range(client, query):
+    assert client.get(f"/v1/brand-details?{query}", headers=KEY).status_code == 422
+
+
+def test_list_without_elasticsearch_is_503(client, monkeypatch):
+    monkeypatch.setattr(es_store, "_client", lambda settings: FakeES(fail=True))
+    assert client.get("/v1/brand-details", headers=KEY).status_code == 503
+
+
+def test_list_needs_the_api_key(client):
+    assert client.get("/v1/brand-details").status_code in (401, 403)

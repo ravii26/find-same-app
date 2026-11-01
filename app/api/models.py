@@ -110,6 +110,11 @@ class ScanRequest(BaseModel):
         """The first iOS bundle id, for code that compares against one id. Read-only: send ios_bundles."""
         return self.ios_bundles[0] if self.ios_bundles else None
 
+    def is_name_only(self) -> bool:
+        """No own app, domain or publisher to compare against: only the brand name is known."""
+        return not (self.android_packages or self.ios_bundles or self.official_domain or self.official_domains
+                    or self.official_publishers)
+
     def official_app_ids(self) -> dict[str, set[str]]:
         """The brand's own app ids per platform: {"android": {...}, "ios": {...}}, lower-cased."""
         return {

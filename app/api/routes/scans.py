@@ -53,8 +53,17 @@ def _source_detail(sources: list) -> list:
     ]
 
 
-def _queued(scan_id: str) -> JSONResponse:
-    return JSONResponse(status_code=202, content={"scan_id": scan_id, "message": "Job queued"})
+def _queued(scan_id: str, warning: str | None = None) -> JSONResponse:
+    content = {"scan_id": scan_id, "message": "Job queued"}
+    if warning:
+        content["warning"] = warning
+    return JSONResponse(status_code=202, content=content)
+
+
+def _name_only_warning(brand_name: str) -> str:
+    return (f"No brand named '{brand_name}' is stored, so this is a name-only scan: only apps named exactly like "
+            f"the brand or pairing it with scam, mod or coupon wording are reported. Store the brand with "
+            f"POST /v1/brand-details for a full scan.")
 
 
 async def _own_apps(details: dict) -> list[dict[str, str]]:
@@ -95,6 +104,7 @@ async def create_scan(
         own_apps = await _own_apps(details)
         body = brand_index.merge_into_request(body, details, own_apps)
     body = body.model_copy(update={"submitted": submitted})
+    warning = None if details else _name_only_warning(payload.brand_name)
 
     in_flight = await status_store.running_count(redis) + await status_store.pending_count(redis)
     if in_flight >= settings.max_queue_depth:
@@ -106,7 +116,7 @@ async def create_scan(
     if holder:
         holder_status = await status_store.get_status(redis, holder)
         if holder_status in _ACTIVE:
-            return _queued(holder)
+            return _queued(holder, warning)
         await status_store.replace_dedup(redis, request_hash, scan_id)  # previous scan is finished
 
     result_store.ensure_scan_dir(scan_id)
@@ -116,7 +126,7 @@ async def create_scan(
     await status_store.set_meta(redis, scan_id, brand_name=body.brand_name, created_at=now)
     await status_store.add_pending(redis, scan_id, {**body.model_dump(), "submitted": submitted})
     await promote_pending(redis)  # starts it right away if a slot is free
-    return _queued(scan_id)
+    return _queued(scan_id, warning)
 
 
 # ── GET /v1/progress/{id} ────────────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 # config/scoring.yaml
 # Scoring ruleset — weights and thresholds for relevance scoring.
 # Increment ruleset_version whenever weights or signals change.
-ruleset_version: "v9"
+ruleset_version: "v10"
 
 weights:
   # Name / title similarity (rapidfuzz ratio on homoglyph-folded strings)

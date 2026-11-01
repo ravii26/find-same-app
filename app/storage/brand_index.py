@@ -118,6 +118,26 @@ async def read(name: str) -> dict[str, Any]:
     return await _with_client(action)
 
 
+# Sort by name ignoring case: a keyword sort puts "bob World" after "Zomato". A script needs no mapping change, so
+# brands stored before this sort existed are ordered too; an index without brand_name.raw sorts instead of failing.
+_NAME_SORT = {"_script": {"type": "string", "order": "asc", "script": {"source": (
+    "doc.containsKey('brand_name.raw') && doc['brand_name.raw'].size() > 0"
+    " ? doc['brand_name.raw'].value.toLowerCase() : ''"
+)}}}
+
+
+async def list_all(page: int, size: int) -> dict[str, Any]:
+    """One page of the stored brands, sorted by name, and how many brands are stored in all."""
+    async def action(client, index):
+        resp = await client.search(
+            index=index, query={"match_all": {}}, sort=[_NAME_SORT],
+            from_=(page - 1) * size, size=size, track_total_hits=True,
+        )
+        return {"total": resp["hits"]["total"]["value"], "brands": [h["_source"] for h in resp["hits"]["hits"]]}
+
+    return await _with_client(action)
+
+
 async def update(name: str, details: dict[str, Any]) -> dict[str, Any]:
     """Replace the brand's details. created_at is kept; updated_at is set to now.
 

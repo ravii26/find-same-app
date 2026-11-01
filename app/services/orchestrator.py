@@ -326,6 +326,12 @@ async def _pipeline(scan_id: str, request: ScanRequest, redis_client: aioredis.R
     keywords = expand(request)
     st.expanded_keywords = keywords
 
+    if request.is_name_only():
+        warn("Name-only scan: the brand has no stored apps, domains or publisher, so nothing can be compared with "
+             "its own listings. Only apps named exactly like the brand or pairing it with scam, mod or coupon "
+             "wording are reported, and the brand's own apps may be among them. Store the brand with "
+             "POST /v1/brand-details for a full scan.")
+
     # Fetch official permissions for permission-similarity scoring (Play Store, no APK needed).
     official_permissions: list[str] = []
     if request.android_package:
