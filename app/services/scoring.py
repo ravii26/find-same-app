@@ -305,9 +305,9 @@ def apply_page_assessment(hit: Hit) -> Hit:
 
 async def score_hit(hit: Hit, request: ScanRequest, official_publishers: set[str] | frozenset[str] = frozenset()) -> Hit:
     """Score a single Hit in a thread pool and return the enriched Hit."""
-    from app.services.allowlist import _norm_publisher
+    from app.services.allowlist import publisher_matches
 
-    publisher_is_official = bool(hit.publisher and _norm_publisher(hit.publisher) in official_publishers)
+    publisher_is_official = publisher_matches(hit.publisher, official_publishers)
     # An App Store hit is compared with the brand's iOS bundle ids as well as its Android ids: brands often reuse
     # one id on both stores, and their iOS ids can follow another pattern (com.sbi.YONOUK vs com.YONOUKMobileApp).
     packages = tuple(request.android_packages)
@@ -531,7 +531,7 @@ def _claims_the_brand(hit: Hit, request: ScanRequest) -> bool:
 def _has_evidence_beyond_name(hit: Hit, request: ScanRequest, official_publishers: set[str] | frozenset[str]) -> bool:
     """Publisher, app id, official domain, a close icon, or the app claims to be the brand. A description is not
     used: for a common brand word it only repeats the name ("Bob HR" describes itself as "Bob's mobile app")."""
-    from app.services.allowlist import _norm_publisher
+    from app.services.allowlist import publisher_matches
 
     if hit.is_official_match or _claims_the_brand(hit, request):
         return True
@@ -540,7 +540,7 @@ def _has_evidence_beyond_name(hit: Hit, request: ScanRequest, official_publisher
     brands = [request.brand_name, *request.brand_aliases]
     if presence_any(brands, hit.app_name or hit.title, hit.package_id, hit.publisher) == "fuzzy":
         return True
-    if hit.publisher and _norm_publisher(hit.publisher) in official_publishers:
+    if publisher_matches(hit.publisher, official_publishers):
         return True
     if hit.icon_similarity is not None and hit.icon_similarity >= _ICON_MATCH:
         return True
@@ -555,21 +555,28 @@ def _has_evidence_beyond_name(hit: Hit, request: ScanRequest, official_publisher
 
 
 def _cap_official_copy(hit: Hit, request: ScanRequest, official_publishers: set[str] | frozenset[str]) -> Hit:
-    """The brand's own app id on a third-party site, not under the brand's publisher: most likely a mirror of the real
-    app. Its signing certificate is not checked, so it is not cleared, but it ranks under high risk with that reason.
+    """The brand's own app id on a third-party site that shows no publisher: most likely a mirror of the real app. Its
+    signing certificate is not checked, so it is not cleared, but it ranks under high risk with that reason. A copy that
+    shows another publisher's name keeps its score: someone re-uploaded the app as their own.
 
     Applied after the icon and permission bonuses: a mirror carries the official icon, which would otherwise lift it
     straight back to the top.
     """
-    from app.services.allowlist import _norm_publisher, _platform
+    from app.services.allowlist import _platform, publisher_matches
 
     pkg = (hit.package_id or "").strip().lower()
     if not pkg or hit.is_official_match or (hit.host and hit.host.is_official_store):
         return hit
     if pkg not in request.official_app_ids()[_platform(hit)]:
         return hit
-    if hit.publisher and _norm_publisher(hit.publisher) in official_publishers:
+    if publisher_matches(hit.publisher, official_publishers):
         return hit  # the allowlist decides these
+    if hit.publisher:
+        # Re-uploaded under someone else's name: not a plain mirror, so it keeps its score
+        return hit.model_copy(update={"reasons": hit.reasons + [
+            f"same app id as the official app ({hit.package_id}) re-uploaded under another publisher "
+            f"('{hit.publisher}'): possibly repackaged; its signing certificate is not checked"
+        ]})
     cap = int(_load_config()["signals"].get("unverified_official_copy_cap", 55))
     if hit.relevance_score <= cap:
         return hit
@@ -580,6 +587,24 @@ def _cap_official_copy(hit: Hit, request: ScanRequest, official_publishers: set[
             "real app; its signing certificate is not checked, so it is kept for review"
         ],
     })
+
+
+def _note_unverified_brand_publisher(
+    hit: Hit, request: ScanRequest, official_publishers: set[str] | frozenset[str],
+) -> Hit:
+    """A listing that shows the brand's publisher name but is not one of its verified apps: say so, so a reviewer can
+    tell an old or withdrawn app of the brand from a copy that borrows its name. The score is not changed."""
+    from app.services.allowlist import _platform, publisher_matches
+
+    pkg = (hit.package_id or "").strip().lower()
+    if (hit.type != HitType.app_listing or not pkg or (hit.host and hit.host.is_official_store)
+            or not publisher_matches(hit.publisher, official_publishers)
+            or pkg in request.official_app_ids()[_platform(hit)]):
+        return hit
+    return hit.model_copy(update={"reasons": hit.reasons + [
+        f"shows the brand's publisher name ('{hit.publisher}'), but {hit.package_id} is not under the brand's Google "
+        "Play account: an old or withdrawn app of the brand, or a copy using its name — check before acting"
+    ]})
 
 
 def _raise_brand_repo(hit: Hit, request: ScanRequest) -> Hit:
@@ -643,6 +668,7 @@ async def score_hits(
     )
 
     scored = [_cap_official_copy(h, request, official_publishers) for h in scored]
+    scored = [_note_unverified_brand_publisher(h, request, official_publishers) for h in scored]
     scored = [_gate_name_only(h, request, official_publishers) for h in scored]
     scored = [_raise_brand_repo(h, request) for h in scored]
 

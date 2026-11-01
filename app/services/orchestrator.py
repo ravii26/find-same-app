@@ -34,6 +34,7 @@ from app.services.allowlist import (
     PLAY_DOMAIN,
     _norm_publisher,
     audit_item,
+    publisher_matches,
     drop_official,
     official_publishers,
     split_allowlisted,
@@ -173,6 +174,8 @@ async def _rank_unfinished(scan_id: str, st: _State) -> None:
         hits = deduplicate(hits)
         request = _learn_app_store_sellers(request, hits)
         hits = await _stamp_play_developers(scan_id, request, hits, timeout=_SALVAGE_LOOKUP_SECONDS)
+        request = await _verify_off_play_packages(scan_id, request, hits, timeout=_SALVAGE_LOOKUP_SECONDS)
+        st.request = request
         hits, st.allowlisted = split_allowlisted(hits, request)
     publishers = official_publishers(request)
     scored = list(await asyncio.gather(*[score_hit(h, request, publishers) for h in hits]))
@@ -273,6 +276,52 @@ def _learn_app_store_sellers(request: ScanRequest, hits: list[Hit]) -> ScanReque
             if h.developer_id not in sellers:
                 sellers.append(h.developer_id)
     return request.model_copy(update={"app_store_seller_ids": sellers})
+
+
+_MAX_OFF_PLAY_LOOKUPS = 20
+
+
+async def _verify_off_play_packages(
+    scan_id: str, request: ScanRequest, hits: list[Hit], timeout: float | None = None,
+) -> ScanRequest:
+    """The brand's apps found only on other stores, confirmed on Google Play.
+
+    A listing on an APK site or another store that shows one of the brand's publisher names may be a sibling app
+    the Play search did not return, or a copy that borrows the name. Its package is looked up on Google Play: when
+    Play shows it under one of the brand's own developer accounts, it is the brand's app, and its id joins the
+    official ids so the allowlist clears it (still only with the publisher match). A name alone never clears it.
+    """
+    if not request.play_developer_ids:
+        return request
+    publishers = official_publishers(request)
+    own = request.official_app_ids()["android"]
+    packages = list(dict.fromkeys(
+        h.package_id for h in hits
+        if h.package_id and h.host and h.host.domain not in (PLAY_DOMAIN, APP_STORE_DOMAIN)
+        and h.package_id.strip().lower() not in own and publisher_matches(h.publisher, publishers)
+    ))[:_MAX_OFF_PLAY_LOOKUPS]
+    if not packages:
+        return request
+    from app.services.play_listing import fetch_account
+
+    countries = get_settings().default_country_list()
+    accounts = set(request.play_developer_ids)
+    sem = asyncio.Semaphore(3)
+
+    async def _one(pkg: str) -> str | None:
+        async with sem:
+            return (await fetch_account(pkg, countries))[1]
+
+    lookups = {asyncio.create_task(_one(p)): p for p in packages}
+    done, pending = await asyncio.wait(lookups, timeout=timeout)
+    for task in pending:
+        task.cancel()
+    verified = [lookups[t] for t in done if t.exception() is None and t.result() in accounts]
+    _note(scan_id, "INFO", f"{len(verified)} of {len(packages)} app(s) found on other stores under a brand publisher "
+                           f"name are published by the brand's Google Play account: {', '.join(verified) or 'none'}")
+    if not verified:
+        return request
+    return request.model_copy(update={"android_packages": list(dict.fromkeys([*request.android_packages, *verified]))})
 
 
 async def _stamp_play_developers(
@@ -472,6 +521,8 @@ async def _pipeline(scan_id: str, request: ScanRequest, redis_client: aioredis.R
     st.request = request
     deduped = await _stamp_play_developers(scan_id, request, deduped)
     st.hits = deduped
+    request = await _verify_off_play_packages(scan_id, request, deduped)
+    st.request = request
 
     # Allowlist: drop the brand's own apps/domains/publishers before scoring.
     # Official listings stay until after scoring (icon comparison needs them).

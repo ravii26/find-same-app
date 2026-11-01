@@ -48,6 +48,23 @@ def _norm_publisher(name: str | None) -> str:
     return " ".join(w for w in words if w not in _CORP_SUFFIXES)
 
 
+def publisher_matches(name: str | None, publishers: set[str] | frozenset[str]) -> bool:
+    """Does a listing's publisher name equal one of the brand's (normalised)?
+
+    Some stores cut long names short ("Paytm - One97 Communications L" for "... Communications Ltd."). A name whose
+    last word is the start of a corporate suffix is compared without it, when at least two words remain.
+    """
+    norm = _norm_publisher(name)
+    if not norm or not publishers:
+        return False
+    if norm in publishers:
+        return True
+    words = norm.split()
+    if len(words) >= 3 and any(suffix.startswith(words[-1]) for suffix in _CORP_SUFFIXES):
+        return " ".join(words[:-1]) in publishers
+    return False
+
+
 def _declared_packages(request: ScanRequest) -> set[str]:
     """Package ids the caller declared as legitimate (sister apps), on any platform.
 
@@ -114,7 +131,7 @@ def allowlist_reason(
     pkg = (hit.package_id or "").strip().lower()
     if pkg:
         own = official_ids.get(_platform(hit), set())
-        if publishers and _norm_publisher(hit.publisher) in publishers and pkg in (declared | own):
+        if publishers and publisher_matches(hit.publisher, publishers) and pkg in (declared | own):
             return f"package {hit.package_id} and publisher '{hit.publisher}' match the declared app"
         return None
 

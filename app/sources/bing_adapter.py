@@ -11,11 +11,13 @@ Finds APK download pages, unofficial mirrors, and rogue app listings across the 
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import datetime
 import hashlib
 import logging
 import re
+import time
 from urllib.parse import parse_qs, quote_plus, urlparse
 
 from selectolax.lexbor import LexborHTMLParser as HTMLParser
@@ -92,17 +94,40 @@ class BingAdapter(SourceAdapter):
         error: str | None = None
 
         countries = scan_countries(ctx)
-        # English queries for every country, plus the localized ones of that country's market (config/phrases.yaml)
-        plan = [(cc, q) for cc in countries
-                for q in queries[:3] + [t.format(brand=brand) for t in phrases.search_queries(cc)]]
+        # English queries for every country, plus the localized ones of that country's market (config/phrases.yaml).
+        # Ordered query by query across all countries, so a run cut short by its time budget still covered every
+        # market with the most important queries.
+        per_country = {cc: queries[:3] + [t.format(brand=brand) for t in phrases.search_queries(cc)] for cc in countries}
+        depth = max((len(qs) for qs in per_country.values()), default=0)
+        plan = [(cc, per_country[cc][i]) for i in range(depth) for cc in countries if i < len(per_country[cc])]
+
+        # Several scans at once share Bing's per-site rate limit, so a full plan can outlast the source time limit,
+        # which would discard everything found. Stop starting queries at 75% of it and report what was found.
+        from app.config.settings import get_settings
+        budget = 0.75 * get_settings().source_timeout_seconds
+        started = time.monotonic()
+        done = 0
         for cc, q in plan:
+            if time.monotonic() - started > budget:
+                error = (f"time budget reached: ran {done} of {len(plan)} queries (scans running at once share "
+                         "Bing's rate limit)")
+                log.warning("bing: %s", error)
+                break
+            done += 1
             url = _SEARCH.format(q=quote_plus(q), cc=cc)
             label = country_label(q, cc, countries)
+            remaining = budget - (time.monotonic() - started)
             try:
-                hits.extend(await hits_from_browser(
+                # The budget also bounds the query in progress: under load one query can wait a minute for its turn
+                hits.extend(await asyncio.wait_for(hits_from_browser(
                     url,
                     lambda html, label=label: self._parse(html, label, brand_tokens, skip_domains, seen),
-                ))
+                ), timeout=max(remaining, 1.0)))
+            except asyncio.TimeoutError:
+                error = (f"time budget reached: ran {done - 1} of {len(plan)} queries (scans running at once share "
+                         "Bing's rate limit)")
+                log.warning("bing: %s", error)
+                break
             except BlockedError as e:
                 return hits, SourceStatus(
                     name=self.name, method=self.method, status="blocked", error=str(e)

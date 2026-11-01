@@ -67,6 +67,8 @@ class GitLabAdapter(SourceAdapter):
                 items = _json.loads(resp.content)
             except (FetchError, BlockedError) as e:
                 error = str(e)
+                if "429" in error and not token:
+                    error += " (set GITLAB_TOKEN: GitLab allows few unauthenticated searches)"
                 log.warning("gitlab: request failed for query %r: %s", q, e)
                 continue
             except Exception as e:
