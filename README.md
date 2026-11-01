@@ -703,6 +703,8 @@ Settings come from environment variables (or `.env`, which is not read by this R
 | `MAX_QUEUE_DEPTH` | `100` | Queued plus running scans before the API returns 429 |
 | `EMBEDDED_WORKER` | `true` | The API starts its own worker. Set to `false` when a separate worker runs. |
 | `SCAN_TIMEOUT_SECONDS` | `600` | Scan time limit |
+| `SOURCE_TIMEOUT_SECONDS` | `300` | Time limit for one source. A source that runs longer is stopped and reported as `failed`. |
+| `SCAN_FINISH_RESERVE_SECONDS` | `120` | Collection stops this long before the scan limit, so scoring and the report always get time. Sources still running are reported as `failed` ("did not finish"). |
 | `ANALYZE_APKS` | `false` | Downloads and analyses APKs. Off. |
 | `CAPTURE_EVIDENCE` | `false` | Captures page screenshots and HTML |
 | `ELASTICSEARCH_URL` | `http://localhost:9200` | Optional. If unreachable, indexing fails and the report is still written. |

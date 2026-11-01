@@ -467,21 +467,26 @@ async def score_hits(
     icon_cache: dict[str, str] | None = None,
     official_publishers: set[str] | frozenset[str] = frozenset(),
     dropped: list[Hit] | None = None,
+    enrich: bool = True,
 ) -> list[Hit]:
     """Score all hits concurrently, enrich with permission similarity + pHash,
     return sorted by score desc. Hits under the reporting threshold are appended to `dropped` when given,
-    so the caller can count them instead of losing them silently."""
+    so the caller can count them instead of losing them silently.
+
+    enrich=False skips the permission and icon checks, which make network calls (used when a scan has stopped
+    early and must still rank what it found)."""
     tasks = [score_hit(h, request, official_publishers) for h in hits]
     scored = list(await asyncio.gather(*tasks))
 
     # Permission similarity enrichment (official permissions read from Google Play)
-    if official_permissions:
+    if enrich and official_permissions:
         scored = await _enrich_permission_similarity(
             scored, official_permissions, request.brand_name, official_package=request.android_package,
         )
 
     # pHash enrichment — uses pre-populated cache from parallel prefetch if available
-    scored = await _enrich_phash(scored, request.brand_name, icon_cache=icon_cache)
+    if enrich:
+        scored = await _enrich_phash(scored, request.brand_name, icon_cache=icon_cache)
 
     filtered = [h for h in scored if h.relevance_score >= min_relevance_for(h)]
     if dropped is not None:

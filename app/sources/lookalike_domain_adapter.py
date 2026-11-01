@@ -254,6 +254,15 @@ class LookalikeDomainAdapter(SourceAdapter):
 
         candidates = generate_candidates(official)
         sem = asyncio.Semaphore(_DNS_CONCURRENCY)
+
+        # Control: the brand's own domain must resolve. If it does not, DNS is not working here, and "no lookalike
+        # resolves" would be reported as a clean result when nothing was actually checked.
+        if not await _resolves(registrable_domain(official), sem):
+            return [], SourceStatus(
+                name=self.name, method=self.method, status="failed",
+                error=f"DNS check failed: the official domain {registrable_domain(official)} does not resolve, "
+                      "so lookalike domains could not be checked",
+            )
         results = await asyncio.gather(*[_resolves(d, sem) for d in candidates])
         live = [d for d, ok in zip(candidates, results) if ok]
 

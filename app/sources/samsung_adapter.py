@@ -22,7 +22,7 @@ from app.api.models import (
     SourceMethod,
     SourceStatus,
 )
-from app.sources.base import SourceAdapter
+from app.sources.base import SourceAdapter, note_page_error, page_problem, scrape_status
 
 from app.utils.http_client import throttle
 
@@ -81,6 +81,8 @@ class SamsungAdapter(SourceAdapter):
 
         hits: list[Hit] = []
         seen: set[str] = set()
+        errors: list[str] = []
+        blocked: list[str] = []
 
         try:
             async with async_playwright() as p:
@@ -107,7 +109,11 @@ class SamsungAdapter(SourceAdapter):
                     page = await bctx.new_page()
                     try:
                         await throttle(search_url)
-                        await page.goto(search_url, wait_until="domcontentloaded", timeout=35000)
+                        resp = await page.goto(search_url, wait_until="domcontentloaded", timeout=35000)
+                        problem = page_problem(resp.status if resp else None, await page.title())
+                        if problem:
+                            blocked.append(f"{problem} from galaxystore.samsung.com")
+                            continue
                         # Give JS time to render results; networkidle can hang on SPAs
                         try:
                             await page.wait_for_load_state("networkidle", timeout=20000)
@@ -169,6 +175,7 @@ class SamsungAdapter(SourceAdapter):
 
                     except Exception as e:
                         log.warning("samsung: failed to load/parse results for term %r: %s", term, e)
+                        note_page_error(e, errors, blocked)
                     finally:
                         await page.close()
 
@@ -181,6 +188,5 @@ class SamsungAdapter(SourceAdapter):
                 error=f"Playwright error: {exc}",
             )
 
-        return hits, SourceStatus(
-            name=self.name, method=self.method, status="ok", results=len(hits)
-        )
+        # A page that never loaded is not "no results": report it as blocked/failed (or partial with some hits)
+        return hits, scrape_status(self.name, self.method, hits, errors=errors, blocked=blocked)

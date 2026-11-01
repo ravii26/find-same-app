@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     max_response_bytes: int = 10 * 1024 * 1024  # 10 MB
     max_apk_bytes: int = 100 * 1024 * 1024  # 100 MB
     scan_timeout_seconds: int = 600
+    # One source may run this long; then it is stopped and reported as failed, so it cannot hold up the scan.
+    source_timeout_seconds: int = 300
+    # Collection stops this many seconds before scan_timeout_seconds, keeping time for scoring and the report.
+    scan_finish_reserve_seconds: int = 120
 
     # HTTP Client
     http_connect_timeout: float = 10.0
@@ -91,6 +95,10 @@ class Settings(BaseSettings):
     def scan_ceiling_seconds(self) -> int:
         """Hard limit for one scan."""
         return self.scan_timeout_seconds
+
+    def collection_seconds(self) -> int:
+        """Time the sources get before collection stops and the scan moves on to scoring (at least 30 s)."""
+        return max(30, self.scan_timeout_seconds - self.scan_finish_reserve_seconds)
 
     @field_validator("data_dir", "uploads_dir", mode="before")
     @classmethod
