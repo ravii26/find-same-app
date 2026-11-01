@@ -295,6 +295,11 @@ async def score_hit(hit: Hit, request: ScanRequest, official_publishers: set[str
     from app.services.allowlist import _norm_publisher
 
     publisher_is_official = bool(hit.publisher and _norm_publisher(hit.publisher) in official_publishers)
+    # An App Store hit is compared with the brand's iOS bundle ids as well as its Android ids: brands often reuse
+    # one id on both stores, and their iOS ids can follow another pattern (com.sbi.YONOUK vs com.YONOUKMobileApp).
+    packages = tuple(request.android_packages)
+    if hit.host and hit.host.domain == "apps.apple.com":
+        packages = tuple(dict.fromkeys([*request.ios_bundles, *request.android_packages]))
     loop = asyncio.get_event_loop()
     score, reasons = await loop.run_in_executor(
         _executor,
@@ -313,7 +318,7 @@ async def score_hit(hit: Hit, request: ScanRequest, official_publishers: set[str
         publisher_is_official,
         hit.snippet,
         tuple(request.brand_aliases),
-        tuple(request.android_packages),
+        packages,
     )
     return hit.model_copy(update={"relevance_score": score, "reasons": reasons})
 

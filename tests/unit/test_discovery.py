@@ -6,9 +6,9 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
-from app.api.models import ScanRequest
-from app.api.routes.brands import DiscoverRequest
-from app.services import brand_store, discovery
+from app.api.routes.brand_details import BrandDetailsRequest
+from app.services import discovery
+from app.storage import brand_index
 
 PLAY = "https://play.google.com/store/apps/details?id=com.sbi.lotusintouch"
 
@@ -31,7 +31,7 @@ def test_non_listing_links_are_rejected(url):
 
 def test_discover_request_rejects_a_non_play_link():
     with pytest.raises(ValidationError):
-        DiscoverRequest(brand_name="YONO SBI", play_store_url="https://example.com/app")
+        BrandDetailsRequest(brand_name="YONO SBI", play_store_url="https://example.com/app")
 
 
 def test_name_match_is_whole_phrase_so_google_home_is_not_google_pay():
@@ -127,69 +127,12 @@ async def test_unreadable_listing_is_a_discovery_error(monkeypatch):
         await discovery.discover([PLAY], [], "YONO SBI", aliases=[], cc="in")
 
 
-# ── brand record: confirmation and the scan merge ─────────────────────────────
+# ── brand ids ──────────────────────────────────────────────────────────────────
 
-@pytest.fixture
-def brand_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(brand_store, "_dir", lambda: tmp_path)
-    return tmp_path
-
-
-BRAND_ID = "brd_01HZX0000000000000000000AB"
-
-
-def _done_record():
-    record = brand_store.create(BRAND_ID, {
-        "brand_name": "YONO SBI", "play_store_url": PLAY, "official_domains": ["onlinesbi.sbi"],
-        "aliases": [], "country": "in",
-    })
-    return brand_store.set_candidates(record, {
-        "play_developer": "State Bank of India",
-        "candidates": [
-            {"store": "play", "id": "com.sbi.lotusintouch", "name": "YONO SBI", "publisher": "State Bank of India",
-             "default": True},
-            {"store": "app_store", "id": "com.sbi.YONOBD", "name": "YONO SBI Bangladesh",
-             "publisher": "State Bank of India", "default": True},
-        ],
-    })
-
-
-def test_confirm_stores_only_selected_candidates_with_audit(brand_dir):
-    record = _done_record()
-    record = brand_store.confirm(record, [{"store": "play", "id": "com.sbi.lotusintouch"}], "ops@example")
-    assert [c["id"] for c in record["confirmed"]] == ["com.sbi.lotusintouch"]
-    assert record["confirmed"][0]["confirmed_by"] == "ops@example"
-    assert record["confirmed"][0]["confirmed_at"]
-
-
-def test_confirm_rejects_an_unknown_candidate(brand_dir):
-    record = _done_record()
-    with pytest.raises(ValueError):
-        brand_store.confirm(record, [{"store": "play", "id": "com.not.found"}], "ops@example")
-
-
-def test_apply_to_request_routes_each_id_to_its_platform(brand_dir):
-    record = brand_store.confirm(
-        _done_record(),
-        [{"store": "play", "id": "com.sbi.lotusintouch"}, {"store": "app_store", "id": "com.sbi.YONOBD"}],
-        "ops@example",
-    )
-    body = ScanRequest(brand_name="YONO SBI", brand_id=BRAND_ID)
-    merged = brand_store.apply_to_request(body, record)
-
-    assert merged.android_packages == ["com.sbi.lotusintouch"]
-    assert merged.ios_bundles == ["com.sbi.YONOBD"]
-    assert merged.official_publishers == ["State Bank of India"]
-    assert merged.official_domain == "onlinesbi.sbi"
-    # the store-specific ids are on their own platform only
-    ids = merged.official_app_ids()
-    assert "com.sbi.yonobd" not in ids["android"]
-    assert "com.sbi.lotusintouch" not in ids["ios"]
-
-
-def test_invalid_brand_id_is_not_loaded(brand_dir):
-    assert brand_store.load("../etc/passwd") is None
-    assert brand_store.load("brd_short") is None
+def test_invalid_brand_id_is_refused():
+    assert not brand_index.valid_brand_id("../etc/passwd")
+    assert not brand_index.valid_brand_id("brd_short")
+    assert brand_index.valid_brand_id("brd_01HZX0000000000000000000AB")
 
 
 # ── developer page: browser scroll, static fallback ───────────────────────────
@@ -258,43 +201,13 @@ async def test_links_for_one_developer_read_its_page_once(monkeypatch):
 
 
 def test_single_link_field_is_added_to_the_list():
-    body = DiscoverRequest(brand_name="YONO SBI", play_store_url=PLAY)
+    body = BrandDetailsRequest(brand_name="YONO SBI", play_store_url=PLAY)
     assert body.play_store_urls == [PLAY]
 
 
 def test_each_list_entry_is_checked():
     with pytest.raises(ValidationError):
-        DiscoverRequest(brand_name="YONO SBI", play_store_urls=[PLAY, "https://example.com/app"])
-
-
-# ── the customer's own links are allowlisted at once ──────────────────────────
-
-async def test_apps_behind_the_links_are_confirmed_when_discovery_finishes(monkeypatch, brand_dir):
-    _patch_network(monkeypatch)
-    result = await discovery.discover([PLAY], [], "YONO SBI", [], "in")
-    record = brand_store.create(BRAND_ID, {"brand_name": "YONO SBI"})
-    record = brand_store.set_candidates(record, result)
-
-    confirmed = {(c["store"], c["id"]) for c in record["confirmed"]}
-    assert confirmed == {("play", "com.sbi.lotusintouch")}  # the linked app only, not the developer's other apps
-    assert record["confirmed"][0]["confirmed_by"] == brand_store.LINK_CONFIRMER
-
-
-async def test_other_apps_of_the_developer_still_need_confirmation(monkeypatch, brand_dir):
-    _patch_network(monkeypatch)
-    result = await discovery.discover([PLAY], [], "YONO SBI", [], "in")
-    record = brand_store.set_candidates(brand_store.create(BRAND_ID, {"brand_name": "YONO SBI"}), result)
-
-    assert ("play", "com.YONOMUApp") not in {(c["store"], c["id"]) for c in record["confirmed"]}
-
-
-async def test_confirm_keeps_the_linked_apps_even_when_left_out(monkeypatch, brand_dir):
-    _patch_network(monkeypatch)
-    result = await discovery.discover([PLAY], [], "YONO SBI", [], "in")
-    record = brand_store.set_candidates(brand_store.create(BRAND_ID, {"brand_name": "YONO SBI"}), result)
-    record = brand_store.confirm(record, [{"store": "play", "id": "com.YONOMUApp"}], "ops@example")
-
-    assert {c["id"] for c in record["confirmed"]} == {"com.sbi.lotusintouch", "com.YONOMUApp"}
+        BrandDetailsRequest(brand_name="YONO SBI", play_store_urls=[PLAY, "https://example.com/app"])
 
 
 # ── the brand's own store links, read at scan time ────────────────────────────

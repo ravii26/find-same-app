@@ -168,3 +168,76 @@ async def test_a_hanging_source_is_stopped_and_reported_failed(monkeypatch):
     ctx = ScanContext(scan_id="scn_x", request=_request(), expanded_keywords=[])
     hits, status = await Hangs()._run(ctx)
     assert hits == [] and status.status == "failed" and "timed out" in status.error
+
+
+# ── a scan stopped by its time limit still allowlists and scores what it collected ─
+
+async def test_timed_out_scan_reports_scored_results_not_raw_hits(monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.api.models import SourceStatus
+    from app.config.settings import get_settings
+
+    sibling = _hit("com.sbi.YONOOM", APPLE, developer_id="503784436")
+    sibling = sibling.model_copy(update={"app_name": "YONO SBI Oman"})
+    rogue = _hit("com.yono.sbi.rewards", APPLE, publisher="Yono Rewards Team", developer_id="999")
+    rogue = rogue.model_copy(update={"app_name": "YONO SBI Rewards KYC"})
+
+    def adapter(name, run):
+        a = MagicMock()
+        a.name, a.method, a._run = name, SourceMethod.api, run
+        return a
+
+    async def answers(ctx):
+        return [sibling, rogue], SourceStatus(name="store", method=SourceMethod.api, status="ok", results=2)
+
+    async def hangs(ctx):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(get_settings(), "scan_timeout_seconds", 1)
+    request = ScanRequest(brand_name="YONO SBI", ios_bundles=["com.sbi.YONOBD"], app_store_seller_ids=["503784436"])
+    with patch("app.services.orchestrator.get_all_adapters",
+               return_value=[adapter("store", answers), adapter("hangs", hangs)]), \
+         patch("app.services.orchestrator.status_store") as ss:
+        ss.update_meta_field = ss.set_progress = ss.update_sources = AsyncMock()
+        report = await orchestrator.run_scan("scn_t", request, AsyncMock())
+
+    assert "timed out" in report.error
+    assert [h.package_id for h in report.results] == ["com.yono.sbi.rewards"]
+    assert report.results[0].relevance_score > 0
+    assert any(a.package_id == "com.sbi.YONOOM" and "account" in a.reason for a in report.allowlisted)
+    assert report.summary.sources_total == 2
+    assert {s.name: s.status for s in report.source_statuses} == {"store": "ok", "hangs": "failed"}
+    assert not any("not scored" in w for w in report.warnings)
+
+
+# ── App Store hits are compared with the brand's iOS ids ───────────────────────
+
+async def test_app_store_hit_is_compared_with_ios_bundles():
+    from app.services.scoring import score_hit
+
+    request = ScanRequest(brand_name="YONO SBI", android_packages=["com.YONOUKMobileApp"],
+                          ios_bundles=["com.sbi.YONOUK"])
+    on_apple = await score_hit(_hit("com.sbi.YONOUK2", APPLE, publisher="X"), request)
+    on_mirror = await score_hit(_hit("com.sbi.YONOUK2", MIRROR, publisher="X"), request)
+    assert any("closely matches official package" in r for r in on_apple.reasons)
+    # an Android listing is still compared with the Android ids only
+    assert not any("closely matches official package" in r for r in on_mirror.reasons)
+
+
+async def test_play_lookups_past_the_time_budget_are_dropped_and_the_rest_kept(monkeypatch):
+    import asyncio
+
+    import app.services.play_listing as play_listing
+
+    async def fetch_account(pkg, countries=None):
+        if pkg == "com.slow":
+            await asyncio.sleep(60)
+        return "State Bank of India", "State+Bank+of+India"
+
+    monkeypatch.setattr(play_listing, "fetch_account", fetch_account)
+    hits = [_hit("com.fast", PLAY), _hit("com.slow", PLAY)]
+    out = await orchestrator._stamp_play_developers(
+        "scn_x", _request(play_developer_ids=["State+Bank+of+India"]), hits, timeout=0.2)
+    assert [h.developer_id for h in out] == ["State+Bank+of+India", None]

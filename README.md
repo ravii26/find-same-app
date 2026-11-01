@@ -1,6 +1,6 @@
 # Rogue App Scanner
 
-Finds mobile apps that impersonate a brand. A customer gives a brand name and one or two store links. The scanner finds the brand's own apps, asks the customer to confirm them, then searches app stores, APK sites, web search and code hosts for other apps that copy the brand. Each hit is scored, and the report lists the likely rogue apps.
+Finds mobile apps that impersonate a brand. A customer gives a brand name and the store links of the brand's own apps. The scanner reads the brand's store accounts from those links, then searches app stores, APK sites, web search and code hosts for other apps that copy the brand. Each hit is scored, and the report lists the likely rogue apps.
 
 The API queues each scan. A Dramatiq worker runs it. Redis holds the queue and live progress.
 
@@ -28,9 +28,9 @@ The API queues each scan. A Dramatiq worker runs it. Redis holds the queue and l
 
 **What it does**
 
-- Finds a brand's own apps from one or two store links and lists them for the customer to confirm.
+- Reads the brand's store accounts (Google Play developer, App Store seller) from the brand's own store links.
 - Searches 25 sources for apps and pages that use the brand name, aliases or lure words.
-- Scores every hit, clears the brand's own confirmed apps, and reports what is left.
+- Scores every hit, clears the apps the brand's accounts publish and the ids the brand declares, and reports what is left.
 
 **What it does not do**
 
@@ -52,19 +52,18 @@ flowchart LR
     C[Customer / client] -->|HTTP + X-API-Key| A[FastAPI API]
     A -->|enqueue| R[(Redis: queues, status, progress)]
     R -->|consume| W[Dramatiq worker]
-    W -->|discovery queue| D[Discovery: store lookups]
+    A -->|brand details| B[(Elasticsearch: rogue-brands)]
     W -->|scans queue| S[Scan: 25 sources, scoring, allowlist]
     S -->|report| F[(data/results/scn_id/output.json)]
-    S -.->|optional| E[(Elasticsearch)]
-    D -->|candidates| B[(data/brands/brd_id.json)]
+    S -.->|optional| E[(Elasticsearch: scans, hits)]
 ```
 
 | Component | Location | Role |
 |---|---|---|
-| API | `app/main.py`, `app/api/routes/` | Validates requests, queues discovery and scans, serves status and reports |
-| Worker | `app/jobs/actors.py` | Runs discovery (`discovery` queue) and scans (`scans` queue) |
-| Discovery | `app/services/discovery.py` | Reads store listings for a brand and returns candidate apps |
-| Brand store | `app/services/brand_store.py` | Brand records as JSON files under `data/brands/` |
+| API | `app/main.py`, `app/api/routes/` | Validates requests, stores brands, queues scans, serves status |
+| Worker | `app/jobs/actors.py` | Runs scans (`scans` queue) |
+| Brands | `app/storage/brand_index.py` | Brand details in Elasticsearch; merges a brand into a scan request |
+| Store links | `app/services/discovery.py` | Reads the brand's own store links (`listed_app`) |
 | Sources | `app/sources/` | One adapter per source, registered in `registry.py` |
 | Orchestrator | `app/services/orchestrator.py` | Runs the sources, dedups, scores, allowlists, builds the report |
 | Scoring | `app/services/scoring.py`, `config/scoring.yaml` | Relevance score per hit |
@@ -78,31 +77,27 @@ flowchart LR
 | Queue | Consumer | Used for |
 |---|---|---|
 | `scans` | worker | Scan jobs |
-| `webhooks` | worker | Webhook delivery |
-| `discovery` | worker | Brand discovery jobs |
+| `webhooks` | worker | Consumed, but nothing sends to it (no webhook is delivered) |
 
-Both the API (embedded worker, when `EMBEDDED_WORKER=true`) and `run.py` start a worker that consumes all three queues.
+Both the API (embedded worker, when `EMBEDDED_WORKER=true`) and `run.py` start a worker that consumes both queues.
 
 ---
 
 ## 3. End-to-end flow (YONO SBI example)
 
-The example brand is YONO SBI, the mobile banking app of State Bank of India. All ids, counts and responses below come from real runs.
+The example brand is YONO SBI, the mobile banking app of State Bank of India. Ids and counts come from real runs.
 
 ```
- 1. POST /v1/brands/discover        -> 202 {brand_id, status: queued}
- 2. worker: discovery job            (Play listing, developer page, App Store seller, name search)
- 3. GET  /v1/brands/{brand_id}      -> status done, candidates[], notes[]
- 4. POST /v1/brands/{brand_id}/confirm   -> 200 {confirmed[]}
- 5. POST /v1/scans  (brand_id)      -> 202 {scan_id}
- 6. worker: scan job                 (sources, dedup, scoring, allowlist, threshold)
- 7. GET  /v1/progress/{scan_id}     -> status, progress   and   data/results/<scan_id>/output.json
+ 1. POST /v1/brand-details          -> 201 {brand_id, ...}
+ 2. POST /v1/scans  (brand_id)      -> 202 {scan_id}
+ 3. worker: scan job                 (sources, store accounts, allowlist, scoring, threshold)
+ 4. GET  /v1/progress/{scan_id}     -> status, progress   and   data/results/<scan_id>/output.json
 ```
 
-### Step 1: start discovery
+### Step 1: store the brand
 
 ```http
-POST /v1/brands/discover
+POST /v1/brand-details
 X-API-Key: <key>
 Content-Type: application/json
 ```
@@ -112,8 +107,8 @@ Content-Type: application/json
   "brand_name": "YONO SBI",
   "aliases": ["YONO"],
   "country": "in",
-  "play_store_url": "https://play.google.com/store/apps/details?id=com.sbi.lotusintouch",
-  "app_store_url": "https://apps.apple.com/in/app/yono-sbi-bangladesh/id1556426905",
+  "play_store_urls": ["https://play.google.com/store/apps/details?id=com.sbi.lotusintouch"],
+  "app_store_urls": ["https://apps.apple.com/in/app/yono-sbi-bangladesh/id1556426905"],
   "official_domains": ["onlinesbi.sbi"]
 }
 ```
@@ -121,145 +116,22 @@ Content-Type: application/json
 | Field | Required | Rule |
 |---|---|---|
 | `brand_name` | yes | 1 to 200 characters |
-| `play_store_url` | one of the two store links | Must be a Play details link with an `id` parameter. Otherwise 422. |
-| `app_store_url` | one of the two store links | Must be an App Store link with an `/id<number>` path. Otherwise 422. |
+| `play_store_urls` | one link in the two lists | Google Play details links with an `id` parameter, up to 20. Otherwise 422. |
+| `app_store_urls` | one link in the two lists | App Store links with an `/id<number>` path, up to 20. Otherwise 422. |
 | `aliases` | no | Other names for the brand. Up to 20. |
 | `official_domains` | no | Brand domains. Up to 20. |
-| `country` | no | Two letters, default `in`. Used for the store lookups in discovery. |
+| `country` | no | Two letters, default `in`. The storefront the brand's links are read from. |
 
-- Sending neither store link returns 422 with "give play_store_url, app_store_url or both".
+- `play_store_url` and `app_store_url` (one link each) are still accepted and added to the lists.
+- Sending no store link returns 422 with "give play_store_urls, app_store_urls or both".
 - `sibling_brands` is refused with 422. It was removed.
+- One link per account is enough: every app that account publishes on that store is cleared. Add a link for each
+  other account the brand publishes under (for example a payments subsidiary).
 
-Response, 202:
+The brand is stored in Elasticsearch (`rogue-brands`); `GET`, `PUT` and `DELETE /v1/brand-details/{brand_id}` read,
+replace and remove it. Without Elasticsearch these calls return 503.
 
-```json
-{"brand_id": "brd_01M684F1HBG8A15AB3EJ3AVBM7", "status": "queued"}
-```
-
-The request is saved to `data/brands/<brand_id>.json` and a job is queued. The request returns straight away.
-
-### Step 2: discovery job (worker)
-
-The job runs in `app/services/discovery.py`. Each source gives candidates. Candidates are then deduplicated on (store, id).
-
-**Google Play (from `play_store_url`)**
-
-1. Read the listing for the package id in the link. The listing gives the developer name (`State Bank of India`) and the developer id (`State+Bank+of+India`).
-2. Read the developer page `https://play.google.com/store/apps/developer?id=<developer id>&hl=en&gl=in` and take every `details?id=` link on it. The SBI run returned 20 packages. The page is limited to its first 20 apps (see [Known limitations](#11-known-limitations)).
-3. Read each package's listing (3 at a time).
-
-**App Store (from `app_store_url`)**
-
-1. Read the app with the iTunes lookup. The app's `artistId` is the seller id.
-2. Read every software item of that seller with `itunes.apple.com/lookup?id=<artistId>&entity=software`. The SBI run returned 28 apps.
-
-If there is no App Store link, the job searches the App Store for sellers whose name equals the Play developer name. A name match only, so the customer must check those apps.
-
-**Name search (both stores)**
-
-For each brand term (the brand name and each alias) the job searches Google Play (up to 30 results; in practice about 12 to 15 per storefront) and the App Store. A result is kept only if its title contains a brand term. Results from this search are never pre-selected.
-
-**Pre-selection and notes**
-
-- A listed app or seller app is pre-selected (`default: true`) when its name contains the brand name or an alias.
-- Search results are not pre-selected (`default: false`).
-- `notes` records what could not be read, for example "the Google Play search for 'YONO' could not be read" or "the Play developer page may not list every app of the developer".
-
-Discovery on SBI with both links and the alias `YONO` returned 58 candidates: 23 Play and 35 App Store, after the name search added its hits to the 20 Play and 28 App Store listed apps. 30 were pre-selected.
-
-### Step 3: check discovery status
-
-```http
-GET /v1/brands/brd_01M684F1HBG8A15AB3EJ3AVBM7
-X-API-Key: <key>
-```
-
-`status` goes `queued` → `running` → `done`, or `failed`.
-
-```json
-{
-  "brand_id": "brd_01M684F1HBG8A15AB3EJ3AVBM7",
-  "status": "done",
-  "error": null,
-  "play_developer": "State Bank of India",
-  "play_developer_id": "State+Bank+of+India",
-  "candidates": [
-    {
-      "store": "play",
-      "id": "com.sbi.lotusintouch",
-      "name": "YONO SBI: Banking, UPI & Pay",
-      "publisher": "State Bank of India",
-      "icon": "https://play-lh.googleusercontent.com/...",
-      "url": "https://play.google.com/store/apps/details?id=com.sbi.lotusintouch",
-      "default": true
-    },
-    {
-      "store": "app_store",
-      "id": "com.sbi.YONOBD",
-      "name": "YONO SBI Bangladesh",
-      "publisher": "State Bank of India",
-      "icon": "https://is1-ssl.mzstatic.com/...",
-      "url": "https://apps.apple.com/in/app/yono-sbi-bangladesh/id1556426905?uo=4",
-      "default": true
-    }
-  ],
-  "notes": [
-    "the Play developer page may not list every app of the developer"
-  ],
-  "confirmed": [],
-  "confirmed_at": null
-}
-```
-
-`candidates` has one entry per app. Entries are shown above in full; the real response has 58 entries for SBI.
-
-### Step 4: customer confirmation
-
-```http
-POST /v1/brands/brd_01M684F1HBG8A15AB3EJ3AVBM7/confirm
-X-API-Key: <key>
-Content-Type: application/json
-```
-
-```json
-{
-  "confirmed_by": "ops@customer.example",
-  "selected": [
-    {"store": "play", "id": "com.sbi.lotusintouch"},
-    {"store": "app_store", "id": "com.sbi.YONOBD"}
-  ]
-}
-```
-
-| Rule | Result |
-|---|---|
-| Brand not found | 404 |
-| Discovery not `done` | 409 |
-| An item is not a candidate (store and id must both match) | 422, the request is rejected |
-| Valid request | 200 with the saved list |
-
-- Confirming again replaces the previous list.
-- Each saved item keeps `store`, `id`, `name`, `publisher`, `confirmed_by` and `confirmed_at`. This is the audit trail.
-- Only confirmed items are used by scans.
-
-Response, 200:
-
-```json
-{
-  "brand_id": "brd_01M684F1HBG8A15AB3EJ3AVBM7",
-  "status": "done",
-  "confirmed_at": "2026-10-31T06:52:10.114203+00:00",
-  "confirmed": [
-    {
-      "store": "play", "id": "com.sbi.lotusintouch", "name": "YONO SBI: Banking, UPI & Pay",
-      "publisher": "State Bank of India", "confirmed_by": "ops@customer.example",
-      "confirmed_at": "2026-10-31T06:52:10.114203+00:00"
-    }
-  ]
-}
-```
-
-### Step 5: start a scan
+### Step 2: start a scan
 
 ```http
 POST /v1/scans
@@ -277,20 +149,25 @@ Content-Type: application/json
 
 **What happens before the scan runs**
 
-1. The API loads the brand. Unknown brand: 404. Brand not confirmed: 409.
-2. The request is saved as sent. This becomes the report's `query`.
-3. The confirmed brand data is merged into the request:
+1. The API loads the brand. Unknown brand: 404. Elasticsearch unreachable: 503.
+2. Each of the brand's store links is read from its store. A store that cannot be read: 503, so no app is
+   allowlisted on a guessed publisher.
+3. The request is saved as sent. This becomes the report's `query`.
+4. The brand is merged into the request:
 
 | Brand data | Goes to the scan request as |
 |---|---|
-| Confirmed Play ids | `android_packages` |
-| Confirmed App Store ids | `ios_bundles` |
-| Publisher names of the confirmed apps | `official_publishers` |
+| Play ids behind the brand's links | `android_packages` |
+| App Store ids behind the brand's links | `ios_bundles` |
+| Publisher names of those apps | `official_publishers` |
+| Developer ids of those Play apps | `play_developer_ids` |
+| Seller ids (`artistId`) of those App Store apps | `app_store_seller_ids` |
+| Apps kept from earlier scans (`allowlisted_apps`) | `android_packages`, `ios_bundles`, `official_publishers` |
 | Aliases | `brand_aliases` |
-| Domains from discovery | `official_domains` (added to the ones you send) |
+| Official domains | `official_domains` (added to the ones you send) |
 
-4. An identical request that is still queued or running returns the existing scan instead of starting another. The check uses a hash of the merged request.
-5. If the queue is full (`max_queue_depth`), the API returns 429.
+5. An identical request that is still queued or running returns the existing scan instead of starting another. The check uses a hash of the merged request.
+6. If the queue is full (`max_queue_depth`), the API returns 429.
 
 Response, 202:
 
@@ -298,20 +175,21 @@ Response, 202:
 {"scan_id": "scn_01M68BXR0V087DGN1HREJXE7XW", "message": "Job queued"}
 ```
 
-### Step 6: scan execution
+### Step 3: scan execution
 
 Each step runs in the worker, in `app/services/orchestrator.py`.
 
 1. **Keyword expansion.** Search terms are built from the brand name and aliases (see [section 8](#8-keyword-expansion)). The SBI run had 48 terms.
 2. **Sources.** All 25 sources run in parallel. Each one returns hits and a status (`ok`, `failed`, `blocked` or `skipped`).
 3. **Deduplication.** Hits with the same URL are merged. Each hit keeps every query and source that found it.
-4. **Scoring.** Each hit is scored from 0 to 100 (see [section 5](#5-scoring)).
-5. **Allowlist.** A hit that matches a confirmed publisher and one of the brand's own ids on the same platform is moved to `allowlisted` with a reason (see [section 6](#6-allowlist)).
-6. **Threshold.** Hits under 35 are moved to `suppressed`. Hits from social and web-search sources need 40.
-7. **Classification.** Scores of 70 and up are high risk. Hits from 35 to 69 are for review.
-8. **Report.** The report is written to `data/results/<scan_id>/output.json`. If Elasticsearch is configured, the scan and hits are also indexed there. Indexing failures are logged as warnings and do not fail the scan.
+4. **Store accounts.** Google Play hits that show a brand publisher name have their listing read for the developer id (see [section 6](#6-allowlist)).
+5. **Allowlist.** A hit published by one of the brand's store accounts, or matching a declared publisher and one of the brand's ids on the same platform, is moved to `allowlisted` with a reason (see [section 6](#6-allowlist)).
+6. **Scoring.** Each hit is scored from 0 to 100 (see [section 5](#5-scoring)).
+7. **Threshold.** Hits under 35 are moved to `suppressed`. Hits from social and web-search sources need 40.
+8. **Classification.** Scores of 70 and up are high risk. Hits from 35 to 69 are for review.
+9. **Report.** The report is written to `data/results/<scan_id>/output.json`. If Elasticsearch is configured, the scan and hits are also indexed there. Indexing failures are logged as warnings and do not fail the scan.
 
-### Step 7: read the report
+### Step 4: read the report
 
 ```http
 GET /v1/progress/scn_01M68BXR0V087DGN1HREJXE7XW
@@ -351,18 +229,17 @@ Other endpoints:
 | Input | Required | Where |
 |---|---|---|
 | Brand name | yes | `brand_name` |
-| At least one store link | yes | `play_store_url` or `app_store_url` (both allowed) |
-| Official domains | recommended | `official_domains` at discovery and scan |
-| Aliases | no | `aliases` at discovery |
-| Confirmation of the discovered app list | yes, before a scan with `brand_id` | `POST /v1/brands/{id}/confirm` |
+| At least one store link | yes | `play_store_urls` or `app_store_urls` (both allowed) |
+| Official domains | recommended | `official_domains` on the brand and the scan |
+| Aliases | no | `aliases` on the brand |
 
 Brand logos are not an input yet. Icon comparison is in the scoring code, but the scan does not use a logo supplied by the customer.
 
 **The system finds these itself; the customer never types them**
 
-- Package ids and bundle ids of the brand's apps (from the store links and the seller and developer lookups).
-- Publisher and developer names (from the listings).
-- The other apps of the same developer or seller (from the developer page and the seller lookup).
+- Package ids and bundle ids of the brand's apps (from the store links).
+- Publisher names and store account ids (from the listings).
+- The other apps of the same developer or seller: they are cleared by the account id, without being listed.
 
 **Removed inputs**
 
@@ -385,7 +262,7 @@ Scoring is deterministic. Weights and signal values are in `config/scoring.yaml`
 | Weight | Value | Signal |
 |---|---|---|
 | `name_similarity` | 0.30 | Title or app name against the brand name, fuzzy, on folded text |
-| `package_similarity` | 0.25 | Package id against the brand's official package ids |
+| `package_similarity` | 0.25 | Package id against the brand's official ids: App Store hits against its iOS and Android ids, other hits against its Android ids |
 | `domain_similarity` | 0.15 | Registrable domain against the official domain |
 | `publisher_match` | 0.10 | Publisher name against the brand name |
 | `apk_site_host` | 0.08 | Hit is on an APK distribution site |
@@ -449,7 +326,7 @@ Package `com.YONODEMobileApp`, publisher `State Bank of India`, host `app_store`
 
 1. **Presence.** Exact match on the brand name, so no cap.
 2. **Name similarity.** "YONO SBI Europe" is close to "YONO SBI", so the name term adds points. The report says "resembles brand name".
-3. **Package similarity.** The package is compared with every confirmed Android id. It is close to `com.YONOUKMobileApp` and the other `com.YONO*MobileApp` ids, so the package term is large, and the suffix-variation signal (+5) applies. The report says "closely matches official package" and "suffix variation".
+3. **Package similarity.** The package is compared with every Android id of the brand. It is close to `com.YONOUKMobileApp` and the other `com.YONO*MobileApp` ids, so the package term is large, and the suffix-variation signal (+5) applies. The report says "closely matches official package" and "suffix variation".
 4. **Official store.** It is on an official store but is not the official listing, so `official_store_name_clone` (+15) applies.
 5. **Result.** Score 76, high risk.
 
@@ -466,7 +343,7 @@ This was a false positive. It is one of the brand's own apps, but the customer h
 - Google Play: the listing's developer id is in `play_developer_ids`.
 - App Store: the listing's seller id (`artistId`) is in `app_store_seller_ids`.
 
-The store issues these ids, and only the account owner can publish under one. So every app the brand's account publishes is cleared, including sibling apps the customer never confirmed and apps published after discovery. A copy that uses the same publisher *name* under another account is not cleared. The ids come only from Google Play and the App Store, never from a third-party site.
+The store issues these ids, and only the account owner can publish under one. So every app the brand's account publishes is cleared, including sibling apps nobody listed and apps the brand publishes later. A copy that uses the same publisher *name* under another account is not cleared. The ids come only from Google Play and the App Store, never from a third-party site.
 
 Where the account ids come from:
 
@@ -480,15 +357,15 @@ Play search results show the developer name but not the id. Each Play hit that s
 
 Any other app hit is allowlisted only when **both** are true:
 
-1. **Publisher.** The hit's publisher matches a confirmed publisher. Matching ignores case, punctuation and company suffixes (`Pvt`, `Ltd`, `Inc`).
-2. **Package.** The hit's package id is one of the brand's confirmed ids on the **same platform**, or is in `allowlist_packages`.
+1. **Publisher.** The hit's publisher matches a declared publisher (`official_publishers`, which includes the publishers of the brand's own links). Matching ignores case, punctuation and company suffixes (`Pvt`, `Ltd`, `Inc`).
+2. **Package.** The hit's package id is one of the brand's ids on the **same platform** (`android_packages`, `ios_bundles`), or is in `allowlist_packages`.
 
-A hit with a confirmed official domain is also allowlisted, on its own, when its registrable domain is in `official_domain` or `official_domains`.
+A web hit is also allowlisted, on its own, when its registrable domain is in `official_domain` or `official_domains`.
 
 ### Platform
 
-- App Store hits (`apps.apple.com`) are checked against the confirmed iOS bundle ids.
-- Every other hit is checked against the confirmed Android package ids.
+- App Store hits (`apps.apple.com`) are checked against the brand's iOS bundle ids.
+- Every other hit is checked against the brand's Android package ids.
 
 Package ids are unique per store only. A Play package id never clears an App Store hit, and an iOS bundle id never clears a Play hit. The same string can also belong to a different app on the other store.
 
@@ -496,7 +373,7 @@ Package ids are unique per store only. A Play package id never clears an App Sto
 
 - **Publisher only is wrong.** Publisher names are self-declared on APK sites and can be copied. Anyone can publish under a famous developer's name.
 - **Package only is wrong.** A package id can be re-uploaded by anyone on a site that does not check ownership, and the same id can be a different app on another store.
-- **Both together** means a copy has to take the publisher and the package. It still needs the customer to confirm the id.
+- **Both together** means a copy has to take the publisher and the package.
 
 ### Reasons
 
@@ -513,7 +390,7 @@ domain sbi.bank.in is an official domain
 | Setting | Use |
 |---|---|
 | `allowlist_packages` | Other ids the brand owns, for example a business app. Still needs a publisher match. |
-| `official_publishers` | Publisher names. The confirmed publishers are added automatically. |
+| `official_publishers` | Publisher names. The publishers of the brand's own links are added automatically. |
 | `official_domains` | Other registrable domains owned by the brand. |
 
 ---
@@ -589,7 +466,7 @@ The report is `data/results/<scan_id>/output.json`. The latest SBI scan is `scn_
 | Field | Type | Meaning |
 |---|---|---|
 | `scan_id` | string | `scn_` followed by a ULID |
-| `query` | object | The request as the API received it, plus `analyze_apks` and `received_at`. Brand data merged from confirmation is not here. |
+| `query` | object | The request as the API received it, plus `analyze_apks` and `received_at`. Brand data merged from the stored brand is not here. |
 | `summary` | object | Counts (below) |
 | `results` | array of Hit | Hits to review |
 | `allowlisted` | array of AllowlistedItem | Hits cleared by the allowlist |
@@ -752,74 +629,76 @@ Do not wrap `run.py restart` in `timeout`. The timeout kills the processes it st
 
 **Open issues in the latest run**
 
-- **Own-brand apps outside Google Play and the App Store still need confirmation.** Sibling apps on Google Play and the App Store are now cleared by the brand's store account (see [section 6](#6-allowlist)). On other stores (GetApps, Samsung, Huawei, APK sites) there is no trusted account id, so a sibling there is cleared only by publisher plus a confirmed package id. The latest SBI results in [section 12](#12-latest-sbi-results) were produced before this change. Apps published by a different account of the same group (for example SBI Payments) are not covered and still need their own link.
-- **Alias-driven false positives.** The alias "YONO" also matches unrelated apps with the word "Yono" in their name, for example "Chuzu Yono Gobang" (44) and "YoNo: Party Game" (41). Aliases must be real names for the brand.
+- **Own-brand apps on other stores are reported.** Sibling apps on Google Play and the App Store are cleared by the brand's store account (see [section 6](#6-allowlist)). On other stores (Indus Appstore, Aptoide, GetApps, Samsung, Huawei, APK sites) there is no trusted account id, so a sibling there is cleared only by publisher plus a declared package id. In the latest SBI scan, 9 of the 19 results are SBI apps on the Indus Appstore and Aptoide. Clearing them by "package proven on Google Play plus publisher name" is an open decision: a repackaged copy that keeps both would be hidden too.
+- **Other accounts of the same group are not covered.** "YONO SBI Merchant" is published by SBI Payments, a separate account. Add a link to one of its apps to the brand to clear that account.
+- **Alias-driven false positives.** The alias "YONO" also matches unrelated apps with the word "Yono" in their name, for example "Chuzu Yono Gobang" (43) and "YoNo: Party Game" (39). Aliases must be real names for the brand.
 - **Scores have no per-signal breakdown.** The report lists reasons, not the points each signal added. The walkthroughs in section 5 use the configured values and the reasons, not measured points.
-
-**Discovery**
-
-- **The Play developer page can list only about 20 apps.** Discovery scrolls the page in a browser to load the rest. Without the browser (Playwright missing or failing) it reads the static page, which holds the first 20 packages, and says so in `notes`. In an earlier SBI run, `com.YONOZAMobileApp` (YONO SBI South Africa) and other apps were missing from the developer list. Name search finds some of them, but the search returns only 12 to 15 results per storefront.
-- **Without an App Store link, App Store sellers are matched by name.** A seller whose name equals the Play developer name is a candidate. The customer must check it.
-- **No manual add.** A candidate that discovery does not find cannot be added. Confirmation accepts only candidates.
-- **Discovery is one-time.** Candidates are not refreshed after confirmation. A new app of the brand needs a new discovery run.
+- **Play developer-id lookups add time.** Each Google Play hit that shows a brand publisher name is read again for its developer id (23 in the SBI scan, about 40 seconds). The ids are not cached between scans.
 
 **Scanning**
 
 - **Sources fail or are blocked.** In the latest run, six of the 25 sources failed or were blocked: APKPure (403), APKFab (403), Softonic (406), APKCombo (DNS), HappyMod (DNS) and DuckDuckGo (CAPTCHA). Their results are missing from that scan. A `blocked` or `failed` status does not mean the brand has no listings there.
 - **Web search varies.** Bing and DuckDuckGo return different results from run to run. The SBI run had 10 Bing results in one scan and 49 in another. Counts in `suppressed` change for that reason.
-- **Scan time grows with the storefront list.** Each storefront adds Play, App Store and Bing requests. The latest SBI scan took about 80 seconds with five storefronts.
-- **Scoring compares one Android id for APK checks.** Certificate and permission checks use the first confirmed Android id, because they need one official app to compare against. The package and allowlist checks use all of them.
+- **Scan time grows with the storefront list.** Each storefront adds Play, App Store and Bing requests. The latest SBI scan took about 90 to 130 seconds with five storefronts.
+- **A slow source is stopped.** Each source gets `SOURCE_TIMEOUT_SECONDS` (240) and is then reported as `failed`. A scan that reaches `SCAN_TIMEOUT_SECONDS` (600) is `failed`, but what it collected is still allowlisted and scored, without the icon and permission checks.
+- **Scoring compares one Android id for APK checks.** Certificate and permission checks use the first Android id of the brand, because they need one official app to compare against. The package and allowlist checks use all of them.
 - **`allowlist_packages` is not split by platform.** It applies to both stores.
 
 **Storage**
 
 - **Elasticsearch is optional, and its failures are silent.** Indexing failures are logged as warnings in the report, and the scan still completes. Results are then only in `output.json` and are not searchable. In the latest run the warning was present because Elasticsearch was not running.
-- **Brand records are JSON files.** There is no shared store, so two API servers cannot see each other's brands.
+- **Brands need Elasticsearch.** A scan with a `brand_id` returns 503 when Elasticsearch cannot be reached. A scan that sends the ids in its body does not need it.
 
 **Scope**
 
-- **Results are only as good as the confirmed list.** An unconfirmed own app is reported as a finding. A confirmed app is never reported.
+- **Results are only as good as the brand's links.** An own app published under an account the brand has no link for is reported as a finding.
 - **English and the listed localized phrases only.** Other languages depend on the packs in `config/phrases.yaml`.
 
 ---
 
 ## 12. Latest SBI results
 
-Scan `scn_01M68BXR0V087DGN1HREJXE7XW` (both links, aliases `YONO`, storefronts `US,IN,GB,SG,AE`, official domain `yonoretail.sbi.bank.in`).
+Local run on 2026-11-01 with the brand-details flow (both SBI links, alias `YONO`, official domains `onlinesbi.sbi` and `yonoretail.sbi.bank.in`, storefronts `US,IN,GB,SG,AE`). Elasticsearch was not running, so the brand was given to the scan directly.
 
 | Measure | Value |
 |---|---|
-| Results | 15 |
-| Allowlisted | 57 |
-| Suppressed | 307 |
+| Results | 19 |
+| Allowlisted | 54 (45 by the brand's store accounts) |
+| Suppressed | 386 |
 | Sources ok | 19 of 25 |
-| Sources failed or blocked | 6 of 25 |
-| Scan time | about 77 seconds |
-| Keywords | 48 |
+| Sources failed or blocked | 6 of 25 (APKPure, APKFab, Softonic, APKCombo, HappyMod, DuckDuckGo) |
+| Scan time | about 90 seconds |
+| Keywords | 49 |
 
-### The 15 results, labelled by hand
+Before the store-account rule, the same scan reported 42 results, 31 of them SBI's own apps on Google Play and the App Store.
+
+### The 19 results, labelled by hand
 
 The labels are a judgement made from the names and packages. They are not checked against the stores.
 
-| Score | Package or URL | App or page | Label | Why |
+| Score | Store | Package or URL | App or page | Label |
 |---|---|---|---|---|
-| 76 | `com.YONODEMobileApp` | YONO SBI Europe | Own brand, not confirmed | State Bank of India app; not in the confirmed list |
-| 76 | `com.YONOOMMobileApp` | YONO SBI Oman | Own brand, not confirmed | As above |
-| 76 | `com.YONOZAMobileApp` | YONO SBI South Africa | Own brand, not confirmed | As above |
-| 71 | `com.yono.sbimerchant` | YONO SBI Merchant | Different publisher (SBI Payments) | Not the brand's own publisher |
-| 64 | `com.yono_rummy` | Yono Rummy Store | Likely rogue | Gambling app using the brand alias |
-| 59 | `com.YONOUSMobileApp` | YONO US New York | Own brand, not confirmed | As above |
-| 59 | `com.YONOCHMobileApp` | YONO US Chicago | Own brand, not confirmed | As above |
-| 57 | `com.yonogasesrummygame.app` | Yono Vip | Likely rogue | Gambling app using the brand alias |
-| 57 | `my.yono.app` | YONO Financial Marketplace | Unclear | Publisher is a different company (Sabah Credit Corp) |
-| 56 | `com.sonugetyonoslotos.app` | Yono Slots | Likely rogue | Gambling app using the brand alias |
-| 51 | `com.sonuscrachnewyono777.app` | Yono 777 | Likely rogue | Gambling app using the brand alias |
-| 51 | `com.yono.dd9191.gravitytoybox` | Yono dd9191: Gravity Toybox | Likely rogue | Game using the brand alias |
-| 44 | `com.czhy.czwzq` | Chuzu Yono Gobang | Unrelated | Board game; the word "Yono" is incidental |
-| 41 | `com.alexl.tacheles` | YoNo: Party Game | Unrelated | Party game; weak name match |
-| 36 | (web page) | Download Hindi 777 Yono APK | Likely rogue | APK download page |
+| 68 | App Store | `com.yono.sbimerchant` | YONO SBI Merchant | Other account of the group (SBI Payments) |
+| 59 | Aptoide | `com.yono_rummy` | Yono Rummy Store | Likely rogue (gambling app using the alias) |
+| 58 | Aptoide | `com.sbi.SBIFreedomPlus` | Yono Lite SBI | Own app on a third-party store |
+| 54 | Aptoide | `com.sonugetyonoslotos.app` | Yono Slots | Likely rogue |
+| 53 | Indus Appstore | `com.yono.sbimerchant` | YONO SBI Merchant | Other account of the group (SBI Payments) |
+| 52 | Aptoide | `com.YONOUKMobileApp` | YONO SBI UK | Own app on a third-party store |
+| 51 | App Store | `com.yono.dd9191.gravitytoybox` | Yono dd9191: Gravity Toybox | Likely rogue |
+| 48 | Aptoide | `com.yonogasesrummygame.app` | Yono Vip | Likely rogue |
+| 47 | Aptoide | `com.sonuscrachnewyono777.app` | Yono 777 | Likely rogue |
+| 46 | App Store | `my.yono.app` | YONO Financial Marketplace | Unclear (Sabah Credit Corporation) |
+| 44 | Indus Appstore | `com.YONOMUApp` | YONO SBI Mauritius | Own app on a third-party store |
+| 43 | App Store | `com.czhy.czwzq` | Chuzu Yono Gobang | Unrelated |
+| 42 | Indus Appstore | `com.YONOBHMobileApp` | YONO SBI Bahrain | Own app on a third-party store |
+| 42 | Indus Appstore | `com.YONOSGMobileApp` | YONO SBI Singapore | Own app on a third-party store |
+| 41 | Indus Appstore | `com.YONOMVMobileApp` | YONO SBI Maldives | Own app on a third-party store |
+| 41 | Indus Appstore | `com.YONODEMobileApp` | YONO SBI Europe | Own app on a third-party store |
+| 41 | Indus Appstore | `com.YONOBDMobileApp` | YONO SBI Bangladesh | Own app on a third-party store |
+| 39 | App Store | `com.alexl.tacheles` | YoNo: Party Game | Unrelated |
+| 36 | APKKit | (web page) | Download Hindi 777 Yono APK | Likely rogue (APK download page) |
 
-**Judgement totals:** about 6 likely rogue (40 percent of the 15), 6 own-brand apps not yet confirmed, 1 different publisher, 2 unrelated games and 1 unclear. The earlier figure of "5 true positives and 4 false positives, about 56 percent precision" is not what the latest scan gives, and this README does not use it.
+**Judgement totals:** 6 likely rogue, 9 own apps on third-party stores (see [section 11](#11-known-limitations)), 2 listings of the group's other account, 2 unrelated and 1 unclear.
 
 ---
 
@@ -831,7 +710,7 @@ The labels are a judgement made from the names and packages. They are not checke
 .venv312/bin/python -m pytest tests/unit -q -p no:cacheprovider --ignore tests/unit/test_csv_injection.py --ignore tests/unit/test_url_tools.py
 ```
 
-Latest run: 223 passed, 30 failed. The 30 failures were there before recent work. Two test files were excluded: `test_csv_injection.py` and `test_url_tools.py`.
+Latest run: 271 passed, 26 failed. The 26 failures test features that were removed (`callback_url`, `depth`, keyword validation, older rate-limiter and adapter internals). Two test files were excluded because they import functions that no longer exist: `test_csv_injection.py` and `test_url_tools.py`.
 
 `tests/integration/` calls `status_store` functions that no longer exist (`get_dedup`, `add_to_running`, `get_progress`). Those tests fail and are not part of the run above.
 
@@ -841,7 +720,7 @@ Latest run: 223 passed, 30 failed. The 30 failures were there before recent work
 .venv312/bin/ruff check --select F,E9 app tests
 ```
 
-Known finding: `app/services/orchestrator.py` F402, a name `field` shadowed by a loop variable. It predates the brand work and is not fixed.
+Known findings: four unused imports in `tests/conftest.py`.
 
 ### Where to change things
 
@@ -851,7 +730,8 @@ Known finding: `app/services/orchestrator.py` F402, a name `field` shadowed by a
 | Lure and scam words, localized packs | `config/phrases.yaml` |
 | Storefronts every scan searches | `DEFAULT_COUNTRIES` |
 | A source | `app/sources/<name>_adapter.py` and `app/sources/registry.py` |
-| Discovery rules | `app/services/discovery.py` |
+| Reading the brand's store links | `app/services/discovery.py` (`listed_app`) |
+| Source and scan time limits | `SOURCE_TIMEOUT_SECONDS`, `SCAN_TIMEOUT_SECONDS` |
 | Allowlist rule | `app/services/allowlist.py` |
 | Request fields | `app/api/models.py` |
 # find-same-app

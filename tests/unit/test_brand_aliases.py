@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime
 
 from app.api.models import Hit, HostInfo, ScanRequest
-from app.services import brand_store
+from app.storage import brand_index
 from app.services.brand_match import presence_any
 from app.services.scoring import _score_one, min_relevance_for
 
@@ -52,12 +52,9 @@ def test_threshold_follows_the_source_group():
     assert min_relevance_for(store) == 35
 
 
-def test_aliases_reach_the_scan_request_through_the_brand_record(tmp_path, monkeypatch):
-    monkeypatch.setattr(brand_store, "_dir", lambda: tmp_path)
-    brand_id = "brd_01HZX0000000000000000000AB"
-    record = brand_store.create(brand_id, {"brand_name": "YONO SBI", "aliases": ["YONO"], "official_domains": []})
-    record = brand_store.confirm(brand_store.set_candidates(record, {"candidates": [], "play_developer": None}), [], "t")
-    merged = brand_store.apply_to_request(ScanRequest(brand_name="YONO SBI", brand_aliases=["Yono Bank"]), record)
+def test_aliases_reach_the_scan_request_through_the_brand_record():
+    doc = {"brand_id": "brd_01HZX0000000000000000000AB", "brand_name": "YONO SBI", "aliases": ["YONO"]}
+    merged = brand_index.merge_into_request(ScanRequest(brand_name="YONO SBI", brand_aliases=["Yono Bank"]), doc, [])
     assert merged.brand_aliases == ["Yono Bank", "YONO"]
 
 

@@ -1,15 +1,15 @@
 # app/storage/brand_index.py
 """Brand details in Elasticsearch: one document per brand, _id = brand_id.
 
-Index: {ELASTICSEARCH_INDEX_PREFIX}-brands (default "rogue-brands"). A document holds the same fields as the
-body of POST /v1/brands/discover, plus brand_id, created_at and updated_at. The index is created on first use.
-
-Discovery state (candidates, confirmed apps) stays in the brand record files (services/brand_store.py).
+Index: {ELASTICSEARCH_INDEX_PREFIX}-brands (default "rogue-brands"). A document holds the fields of the
+POST /v1/brand-details body, plus brand_id, allowlisted_apps, created_at and updated_at. The index is created on
+first use.
 """
 
 from __future__ import annotations
 
 import datetime
+import re
 from typing import Any
 
 from elasticsearch import BadRequestError, NotFoundError
@@ -19,8 +19,9 @@ from ulid import ULID
 
 from app.config.settings import Settings, get_settings
 from app.api.models import ScanReport, ScanRequest
-from app.services.brand_store import valid_brand_id
 from app.storage import es_store
+
+_ID_RE = re.compile(r"^brd_[0-9A-HJKMNP-TV-Z]{26}$")  # ULID with a brd_ prefix
 
 BRAND_MAPPING: dict[str, Any] = {
     "dynamic": False,
@@ -81,6 +82,10 @@ async def _with_client(action):
         raise BrandIndexUnavailable(f"brand store unavailable: {exc}") from exc
     finally:
         await client.close()
+
+
+def valid_brand_id(brand_id: str) -> bool:
+    return bool(_ID_RE.match(brand_id or ""))
 
 
 def _check_id(brand_id: str) -> None:

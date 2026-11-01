@@ -10,34 +10,32 @@ writes, and what runs next. It describes the code as it is now. For scoring, sou
 
 | Word | Meaning |
 |---|---|
-| **brand record** | A JSON file at `data/brands/<brand_id>.json`. It holds the customer's input, the candidate apps found by discovery, and the apps the customer confirmed. |
-| **candidate** | An app that discovery found for the brand. It is not trusted yet. |
-| **confirmed** | A candidate the customer selected. Only confirmed items are used by a scan that has a `brand_id`. |
+| **brand** | A document in the Elasticsearch index `rogue-brands`, made with `POST /v1/brand-details`. It holds the brand name, aliases, official domains and the brand's own store links. |
+| **store account** | The brand's Google Play developer id or App Store seller id, read from the store behind the brand's own links. Every app the account publishes on that store is allowlisted. |
 | **scan** | One run of the source search, scoring and report. It has a `scan_id` (starts with `scn_`). |
 | **report** | The finished result: `data/results/<scan_id>/output.json`. |
 | **Redis** | Holds the live state of a scan (queued, running, progress) and the queues. |
-| **Dramatiq worker** | A separate process that runs discovery and scans in the background. |
+| **Dramatiq worker** | A separate process that runs scans in the background. |
 
 Every API call except `/health` needs the header `X-API-Key: <your key>`. The local dev value is
 `change-me-in-production`. The check is in `app/api/middleware/auth.py` (`require_api_key`).
 
 ---
 
-## 1. The two flows
-
-There are two parts. You can use either one alone.
+## 1. The flow
 
 ```
-A. Brand confirmation (brand record must already exist)
+A. Brand (once)
 
-   POST /v1/brands/{brand_id}/confirm  (customer picks apps)
-          │   brand record now has confirmed apps
+   POST /v1/brand-details  ──► (201 brand_id)
+          │   brand name, aliases, official domains, the brand's own store links
           ▼
 
 B. Scan
 
    POST /v1/scans  ──► (202 scan_id, status "queued")
-          │   with brand_id: merges the confirmed apps into the request
+          │   with brand_id: reads the brand's store links from the stores, merges their ids, publishers and
+          │                  store accounts into the request
           │   without brand_id: uses the ids sent in the body
           ▼
    worker runs the pipeline
@@ -49,23 +47,23 @@ B. Scan
    report is on disk: data/results/<scan_id>/output.json
 ```
 
-Discovery and scans never call each other. The scan endpoint reads the brand record once, when the request
-arrives. It does not start discovery.
+A scan without a `brand_id` does not need a brand.
 
 ---
 
 ## 2. Brand onboarding
 
-### Discovery and the discovery read endpoints are removed from the API
+### Discovery and confirmation are removed
 
-`POST /v1/brands/discover` and `GET /v1/brands/{brand_id}` were removed, so no new brand record is created
-through the API. The discovery code (`app/services/discovery.py`) and its worker job (`discover_brand_actor`) are
-still in the code, but nothing sends them. Confirm works only on brand records that already exist as files.
+`POST /v1/brands/discover`, `GET /v1/brands/{brand_id}` and `POST /v1/brands/{brand_id}/confirm` were removed, with
+the brand record files (`data/brands/`) and the `discovery` worker queue. The customer no longer confirms the brand's
+other apps: the brand's store accounts allowlist them (see README.md, section 6). `discovery.discover()` is still
+in the code but is not called.
 
 ### Brand details (Elasticsearch): create, read, update, delete
 
 These four endpoints store the brand's input in Elasticsearch, in the index `rogue-brands` (the prefix comes from
-`ELASTICSEARCH_INDEX_PREFIX`). The body is the same as the former `POST /v1/brands/discover`, so the same rules apply.
+`ELASTICSEARCH_INDEX_PREFIX`). The body is `BrandDetailsRequest` in `brand_details.py`.
 
 | Call | File and function | What happens |
 |---|---|---|
@@ -84,32 +82,6 @@ those apps too. A copy on another store is never kept.
 
 Brand details do no discovery. They only store the brand. The brand's own apps are allowlisted when a scan with
 its `brand_id` runs: the scan reads each store link from its store, so the publisher is the one the store shows.
-
-### 2.1 `POST /v1/brands/{brand_id}/confirm`
-
-**Handled by:** `brands.py` → `confirm_brand()`, which calls `brand_store.confirm()`
-
-**What it checks first, in order:**
-
-1. API key check.
-2. `404` if the brand is unknown.
-3. `409` if `status` is not `done`. Discovery must finish first.
-4. The body against `ConfirmRequest`: `confirmed_by` (required) and `selected`, a list of
-   `{"store": "play" | "app_store", "id": "..."}`. At least one item.
-5. `brand_store.confirm()` checks that each selected `(store, id)` is in the candidate list.
-   Any other id gives `422` and nothing is saved.
-
-**What it does:**
-
-1. Adds the selected items to the confirmed list. Each item keeps its name, publisher, `confirmed_by` and
-   `confirmed_at`.
-2. Saves the record and returns `{brand_id, status, confirmed_at, confirmed}`.
-
-Apps behind the customer's own links are confirmed when discovery writes the brand record. Confirm never removes
-them. Confirming again adds to the list. Only the apps that came from a link are confirmed without a
-customer step: other apps the developer or seller publishes still need to be selected here.
-
-**Manual add is not built.** An id that is not in the candidate list is refused.
 
 ---
 
@@ -162,12 +134,19 @@ customer step: other apps the developer or seller publishes still need to be sel
 | 1 | (start) | Keywords are expanded (`keyword_expansion.expand`). |
 | 2 | `collecting` | Every source adapter (`app/sources/`) runs concurrently, with at most 8 outbound requests at a time. Hits are collected. |
 | 3 | `deduplicating` | Hits with the same normalized URL are merged, and so are hits with the same package id in the same store. Each merged hit keeps every source that found it. The same package id on Google Play and on an APK mirror stays as two hits. |
-| 4 | `looking for offered apks` | Only if APK analysis is on. Off by default for now. |
-| 5 | `scoring` | Each hit is scored (`app/services/scoring.py`). Name, package, domain, publisher and other signals add up to a score. Caps apply, for example when no brand presence is found. |
-| 6 | (allowlist) | Hits that match a confirmed publisher plus a confirmed id on the same platform, or an official domain, are removed and listed in `allowlisted`. |
-| 7 | `analyzing apks` | Only if APK analysis is on. Off now. |
-| 8 | `capturing evidence` | Only if evidence capture is on. |
-| 9 | (report) | `_build_report()` builds the report. Scans that hit the time limit (`scan_ceiling_seconds`) or raise an error still return a report, with `error` set. |
+| 4 | (store accounts) | The seller id of the brand's own App Store listings is learned, and each Google Play hit that shows a brand publisher name has its listing read for its developer id. |
+| 5 | (allowlist) | Hits published by one of the brand's store accounts on Google Play or the App Store, hits that match a declared publisher plus a declared id on the same platform, and hits on an official domain are removed and listed in `allowlisted`. |
+| 6 | `scoring` | Each hit is scored (`app/services/scoring.py`). Name, package, domain, publisher and other signals add up to a score. App Store hits are compared with the brand's iOS and Android ids, other hits with its Android ids. Caps apply, for example when no brand presence is found. Hits under the threshold go to `suppressed`; official listings and mirror copies of one package are folded. |
+| 7 | `capturing evidence` | Only if evidence capture is on. |
+| 8 | (report) | `_build_report()` builds the report. |
+
+**A scan that stops early.** Each source has its own time limit (`SOURCE_TIMEOUT_SECONDS`, default 240); one that
+runs past it is reported as `failed` and the scan goes on. A scan that hits its own limit (`SCAN_TIMEOUT_SECONDS`,
+default 600) or raises an error still returns a report, with `error` set and status `failed`. If it stopped before
+step 6 finished, what was collected is still allowlisted and scored, within 90 seconds: the Google Play
+developer-id lookups get up to 60 of them and keep what they read, and the icon and permission checks are skipped.
+The report says so in `warnings`. Sources that had not finished are listed in
+`source_statuses` as `failed` with "did not finish before the scan stopped".
 
 A source that fails or is blocked is recorded in `source_statuses`. It does not stop the scan.
 
@@ -232,7 +211,6 @@ Steps 2 to 4 are optional. Without them, send the ids directly in the scan body 
 - **No endpoint returns the report.** Read `output.json` from disk.
 - **The webhook is not sent.** There is a `webhook_timeout` setting and a `webhooks` queue, but no code
   sends a webhook. The `scans.py` comment that mentions a webhook is out of date.
-- **Discovery is one-way.** A brand has no re-run endpoint. To refresh candidates, create a new brand.
 - **Some sources fail** (APKPure, APKFab, Softonic, APKCombo, HappyMod, DuckDuckGo). Their status shows in
   `source_statuses` of the report.
 - **Elasticsearch is not running**, so indexing is skipped. A scan still completes, with a warning.
@@ -243,14 +221,14 @@ Steps 2 to 4 are optional. Without them, send the ids directly in the scan body 
 
 | File | Role |
 |---|---|
-| `app/main.py` | Creates the app, mounts the routes, starts the embedded worker (queues `scans`, `webhooks`, `discovery`). |
+| `app/main.py` | Creates the app, mounts the routes, starts the embedded worker (queues `scans`, `webhooks`). |
 | `app/api/middleware/auth.py` | API key check. |
 | `app/api/models.py` | Request and report models. `ScanRequest` holds the input rules. |
-| `app/api/routes/brands.py` | Brand confirm endpoint. Also holds `DiscoverRequest`, the body shared with brand details. |
+| `app/api/routes/brand_details.py` | Brand details endpoints and their body, `BrandDetailsRequest`. |
 | `app/api/routes/scans.py` | Scan endpoints: create, progress, delete. |
-| `app/services/brand_store.py` | Reads and writes brand records. Merges confirmed apps into a scan request. |
-| `app/services/discovery.py` | Finds candidate apps from the store links and the name search. |
-| `app/jobs/actors.py` | Background jobs: discovery and scan execution, the queue slots. |
+| `app/storage/brand_index.py` | Brands in Elasticsearch. Merges a brand's apps and store accounts into a scan request. |
+| `app/services/discovery.py` | Reads the brand's own store links (`listed_app`). |
+| `app/jobs/actors.py` | Background jobs: scan execution, the queue slots. |
 | `app/jobs/broker.py` | Sets up the Dramatiq broker (Redis). |
 | `app/services/orchestrator.py` | The scan pipeline and the report. |
 | `app/services/scoring.py` | Scores each hit. |

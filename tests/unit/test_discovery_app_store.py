@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from app.api.routes.brands import DiscoverRequest
+from app.api.routes.brand_details import BrandDetailsRequest
 from app.services import discovery
 
 PLAY = "https://play.google.com/store/apps/details?id=com.sbi.lotusintouch"
@@ -78,20 +78,20 @@ async def test_unknown_app_store_app_is_an_error(monkeypatch):
 
 
 def test_request_accepts_either_link_alone():
-    assert DiscoverRequest(brand_name="YONO SBI", app_store_urls=[APP_STORE]).play_store_urls == []
-    assert DiscoverRequest(brand_name="YONO SBI", play_store_urls=[PLAY]).app_store_urls == []
+    assert BrandDetailsRequest(brand_name="YONO SBI", app_store_urls=[APP_STORE]).play_store_urls == []
+    assert BrandDetailsRequest(brand_name="YONO SBI", play_store_urls=[PLAY]).app_store_urls == []
 
 
 def test_request_accepts_both_links():
-    body = DiscoverRequest(brand_name="YONO SBI", play_store_urls=[PLAY], app_store_urls=[APP_STORE])
+    body = BrandDetailsRequest(brand_name="YONO SBI", play_store_urls=[PLAY], app_store_urls=[APP_STORE])
     assert body.play_store_urls == [PLAY] and body.app_store_urls == [APP_STORE]
 
 
 def test_request_needs_one_link():
     with pytest.raises(ValidationError):
-        DiscoverRequest(brand_name="YONO SBI")
+        BrandDetailsRequest(brand_name="YONO SBI")
 
 
 def test_request_rejects_a_non_app_store_link_in_the_app_store_field():
     with pytest.raises(ValidationError):
-        DiscoverRequest(brand_name="YONO SBI", app_store_urls=[PLAY])
+        BrandDetailsRequest(brand_name="YONO SBI", app_store_urls=[PLAY])

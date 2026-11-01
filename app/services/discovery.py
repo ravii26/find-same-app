@@ -10,7 +10,8 @@
                 matches the Play developer name. That match is by name only, so the customer must confirm it.
 
 Candidates are returned with a `default` flag. A candidate is pre-selected only when its name contains the brand
-name or an alias. Nothing here is allowlisted: the customer confirms the list first (see brand_store).
+name or an alias. Nothing here is allowlisted. discover() is not called by the API; scans use listed_app() to read
+the brand's own store links, and services/allowlist.py clears the apps of the brand's store accounts.
 """
 
 from __future__ import annotations

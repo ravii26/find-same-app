@@ -36,7 +36,7 @@ COMMANDS = {
         PYTHON, "-m", "dramatiq", "app.jobs.actors",
         "--processes", "1",
         "--threads", "4",
-        "--queues", "scans", "webhooks", "discovery",
+        "--queues", "scans", "webhooks",
     ],
 }
 

@@ -21,7 +21,6 @@ import redis.asyncio as aioredis
 from app.api.models import ScanRequest, ScanStatus
 from app.config.settings import get_settings
 from app.jobs.broker import get_broker
-from app.services import brand_store, discovery
 from app.services.orchestrator import run_scan
 from app.storage import result_store, scan_log, status_store
 from app.utils.http_client import close_client, close_rate_limiter
@@ -61,36 +60,6 @@ async def promote_pending(redis: aioredis.Redis) -> None:
             await status_store.remove_from_running(redis, scan_id)
             continue
         scan_actor.send(scan_id, request_dict)
-
-
-@dramatiq.actor(queue_name="discovery", max_retries=0, time_limit=10 * 60 * 1000)
-def discover_brand_actor(brand_id: str) -> None:
-    """Find the candidate apps for one brand record (see services/discovery). Runs on the discovery queue."""
-    asyncio.run(_run_discovery(brand_id))
-
-
-async def _run_discovery(brand_id: str) -> None:
-    record = brand_store.load(brand_id)
-    if record is None:
-        log.warning("discovery: brand %s not found", brand_id)
-        return
-    payload = record["input"]
-    record["status"] = "running"
-    brand_store.save(record)
-    try:
-        # Records made before the link lists existed hold one link under the singular key
-        play_urls = payload.get("play_store_urls") or [u for u in [payload.get("play_store_url")] if u]
-        app_urls = payload.get("app_store_urls") or [u for u in [payload.get("app_store_url")] if u]
-        result = await discovery.discover(
-            play_urls, app_urls, payload["brand_name"], payload.get("aliases", []), payload.get("country", "in"),
-        )
-        brand_store.set_candidates(record, result)
-        log.info("discovery: brand %s found %d candidates", brand_id, len(result["candidates"]))
-    except discovery.DiscoveryError as exc:
-        brand_store.set_failed(record, str(exc))
-    except Exception as exc:  # any other failure is recorded on the brand, not raised to the worker
-        log.exception("discovery: brand %s failed", brand_id)
-        brand_store.set_failed(record, f"{type(exc).__name__}: {exc}")
 
 
 @dramatiq.actor(queue_name="scans", max_retries=0, time_limit=get_settings().scan_ceiling_seconds() * 1000 + 120_000)

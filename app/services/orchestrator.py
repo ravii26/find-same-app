@@ -25,6 +25,7 @@ from app.api.models import (
     ScanReport,
     ScanRequest,
     ScanSummary,
+    SourceMethod,
     SourceStatus,
 )
 from app.utils.http_client import is_blocked_message
@@ -45,6 +46,7 @@ from app.services.scoring import (
     min_relevance_for,
     min_relevance,
     ruleset_version,
+    score_hit,
     score_hits,
 )
 from app.sources.registry import get_all_adapters
@@ -64,6 +66,10 @@ class _State:
     statuses: list[SourceStatus] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     expanded_keywords: list = field(default_factory=list)
+    # How far `hits` got: "collecting" (raw or deduplicated), "allowlisted" (unscored), "ranked" (the results)
+    stage: str = "collecting"
+    # (name, method) of every source the scan started, so one that never finished is still reported
+    sources: list[tuple[str, SourceMethod]] = field(default_factory=list)
 
 
 async def run_scan(scan_id: str, request: ScanRequest, redis_client: aioredis.Redis) -> ScanReport:
@@ -87,10 +93,88 @@ async def run_scan(scan_id: str, request: ScanRequest, redis_client: aioredis.Re
     if error:
         _note(scan_id, "ERROR", f"pipeline stopped: {error}")
         st.warnings.append(f"Scan stopped early ({error}); results are what was found so far.")
+        done = {s.name for s in st.statuses}
+        st.statuses.extend(
+            SourceStatus(name=name, method=method, status="failed", error="did not finish before the scan stopped")
+            for name, method in st.sources if name not in done
+        )
+        if st.stage != "ranked" and st.hits:
+            try:
+                await asyncio.wait_for(_rank_unfinished(scan_id, st), _SALVAGE_SECONDS)
+                st.warnings.append(
+                    "Results were allowlisted and scored from what was collected, without the icon and permission "
+                    "checks."
+                )
+            except Exception as exc:  # the raw hits are still reported, and marked as such
+                _note(scan_id, "ERROR", f"could not score the collected hits: {type(exc).__name__}: {exc}")
         if st.hits and not any(h.relevance_score for h in st.hits):
             st.warnings.append("Results were not scored.")
     await status_store.set_progress(redis_client, scan_id, 100)
     return _build_report(scan_id, st, error, int((time.monotonic() - t0) * 1000))
+
+
+# Time a scan that stopped early gets to rank what it collected, and how much of it the Play developer-id lookups
+# may use (the rest of the work needs no network)
+_SALVAGE_SECONDS = 90
+_SALVAGE_LOOKUP_SECONDS = 60
+
+
+def _suppress_low(st: _State, hits: list[Hit]) -> list[Hit]:
+    """Hits that deeper inspection pushed under the reporting threshold are removed, with the reason kept."""
+    threshold = min_relevance()
+    st.suppressed.extend(
+        audit_item(h, h.reasons[-1] if h.reasons else "scored below the reporting threshold")
+        for h in hits if h.relevance_score < threshold
+    )
+    return [h for h in hits if h.relevance_score >= threshold]
+
+
+def _rank(st: _State, scored: list[Hit], below_threshold: list[Hit]) -> None:
+    """From scored hits to the report's results, in st.hits.
+
+    Audits what scored under the threshold, drops the official listings, folds mirror copies of one package
+    into one finding and re-ranks lookalike domains by what their page serves.
+    """
+    # Hits that scored under the reporting threshold are counted and audited, not silently lost
+    st.suppressed.extend(
+        audit_item(h, f"scored {h.relevance_score}, below the reporting threshold ({min_relevance_for(h)}): "
+                      + (h.reasons[-1] if h.reasons else "weak match"))
+        for h in below_threshold
+    )
+    scored, official_dropped = drop_official(scored)
+    st.allowlisted = st.allowlisted + official_dropped
+
+    scored = _suppress_low(st, scored)
+    scored, mirror_dupes = group_mirrors(scored)
+    st.suppressed.extend(mirror_dupes)
+
+    # What each lookalike domain actually serves re-ranks it (brand bait up; parked, blank, neutral and unreachable pages drop out). The check was
+    # made during discovery and kept on the hit, so it runs whether or not evidence files are saved.
+    scored = [apply_page_assessment(h) for h in scored]
+    scored = _suppress_low(st, scored)  # lookalike domains serving nothing suspicious now sit under the threshold
+    scored.sort(key=lambda h: h.relevance_score, reverse=True)
+    st.hits = scored
+    st.stage = "ranked"
+
+
+async def _rank_unfinished(scan_id: str, st: _State) -> None:
+    """The pipeline stopped before its results were ranked: allowlist, score and rank what was collected.
+
+    Otherwise the report would list every raw hit, the brand's own apps included, as a result with score 0.
+    The Play developer-id lookups run within _SALVAGE_LOOKUP_SECONDS; the icon and permission checks are skipped.
+    """
+    request, hits = st.request, st.hits
+    if st.stage == "collecting":
+        hits = deduplicate(hits)
+        request = _learn_app_store_sellers(request, hits)
+        hits = await _stamp_play_developers(scan_id, request, hits, timeout=_SALVAGE_LOOKUP_SECONDS)
+        hits, st.allowlisted = split_allowlisted(hits, request)
+    publishers = official_publishers(request)
+    scored = list(await asyncio.gather(*[score_hit(h, request, publishers) for h in hits]))
+    below = [h for h in scored if h.relevance_score < min_relevance_for(h)]
+    kept = sorted((h for h in scored if h.relevance_score >= min_relevance_for(h)),
+                  key=lambda h: h.relevance_score, reverse=True)
+    _rank(st, kept, below)
 
 
 def _build_report(scan_id: str, st: _State, error: str | None, duration_ms: int) -> ScanReport:
@@ -185,12 +269,15 @@ def _learn_app_store_sellers(request: ScanRequest, hits: list[Hit]) -> ScanReque
     return request.model_copy(update={"app_store_seller_ids": sellers})
 
 
-async def _stamp_play_developers(scan_id: str, request: ScanRequest, hits: list[Hit]) -> list[Hit]:
+async def _stamp_play_developers(
+    scan_id: str, request: ScanRequest, hits: list[Hit], timeout: float | None = None,
+) -> list[Hit]:
     """Set developer_id on the Google Play hits that show one of the brand's publisher names.
 
     Play search results carry the developer's name but not its id, and a name can be copied. Each such hit's
     listing is read for the id, so the allowlist can tell the brand's own account from a copy that uses its name.
     Hits with another publisher name are not looked up: an account shows one name on all its apps.
+    With a timeout, the lookups still running then are dropped and the ids read so far are kept.
     """
     if not request.play_developer_ids:
         return hits
@@ -211,14 +298,18 @@ async def _stamp_play_developers(scan_id: str, request: ScanRequest, hits: list[
         async with sem:
             return (await fetch_account(pkg, countries))[1]
 
-    ids = await asyncio.gather(*[_one(hits[i].package_id) for i in todo], return_exceptions=True)
+    lookups = {asyncio.create_task(_one(hits[i].package_id)): i for i in todo}
+    done, pending = await asyncio.wait(lookups, timeout=timeout)
+    for task in pending:
+        task.cancel()
     out = list(hits)
-    for i, dev_id in zip(todo, ids):
-        if isinstance(dev_id, BaseException):
-            _note(scan_id, "WARN", f"Play developer lookup for {hits[i].package_id} failed: {dev_id}")
-        elif dev_id:
-            out[i] = hits[i].model_copy(update={"developer_id": dev_id})
-    _note(scan_id, "INFO", f"read the Play developer id of {len(todo)} hit(s) that show a brand publisher name")
+    for task in done:
+        i = lookups[task]
+        if task.exception() is not None:
+            _note(scan_id, "WARN", f"Play developer lookup for {hits[i].package_id} failed: {task.exception()}")
+        elif task.result():
+            out[i] = hits[i].model_copy(update={"developer_id": task.result()})
+    _note(scan_id, "INFO", f"read the Play developer id of {len(done)} of {len(todo)} hit(s) that show a brand publisher name")
     return out
 
 
@@ -259,6 +350,7 @@ async def _pipeline(scan_id: str, request: ScanRequest, redis_client: aioredis.R
         if developer_id and developer_id not in request.play_developer_ids:
             request = request.model_copy(update={"play_developer_ids": [*request.play_developer_ids, developer_id]})
             _note(scan_id, "INFO", f"official Play developer id '{developer_id}' read from the listing of {request.android_package}")
+    st.request = request  # with what was learned, so a scan that stops early still allowlists with it
 
     ctx = ScanContext(
         scan_id=scan_id,
@@ -272,6 +364,7 @@ async def _pipeline(scan_id: str, request: ScanRequest, redis_client: aioredis.R
 
     # Run all source adapters concurrently
     adapters = get_all_adapters()
+    st.sources = [(a.name, a.method) for a in adapters]
     total = len(adapters)
     all_hits: list[Hit] = []
     source_statuses = st.statuses
@@ -296,36 +389,41 @@ async def _pipeline(scan_id: str, request: ScanRequest, redis_client: aioredis.R
         async with sem:
             return await adapter._run(ctx)
 
-    tasks = [_run_one(adapter) for adapter in adapters]
+    tasks = [asyncio.create_task(_run_one(adapter)) for adapter in adapters]
     prefetch_tasks: list[asyncio.Task] = []
     completed = 0
 
-    for coro in asyncio.as_completed(tasks):
-        hits, status = await coro
-        all_hits.extend(hits)
-        st.hits = list(all_hits)  # raw hits are reportable if a later step fails
-        if status.status == "failed" and is_blocked_message(status.error):
-            # Refused (bot protection, 403, rate limit) is not the same as down: say so in the report
-            status = status.model_copy(update={"status": "blocked"})
-        elif status.status == "ok" and status.error:
-            # Some queries answered and some failed: the source worked, but not completely
-            status = status.model_copy(update={"status": "partial"})
-        source_statuses.append(status)
-        completed += 1
-        if status.status in ("failed", "blocked", "partial"):
-            _note(scan_id, "WARN", f"source {status.name}: {status.status} — {status.error}")
-            warn(f"source {status.name} {status.status}: {status.error}")
-        elif status.status == "skipped":
-            _note(scan_id, "INFO", f"source {status.name}: skipped — {status.error}")
-        if status.raw_results:
-            _note(scan_id, "INFO", f"source {status.name}: kept {status.results} of {status.raw_results} hits (per-query cap)")
+    try:
+        for coro in asyncio.as_completed(tasks):
+            hits, status = await coro
+            all_hits.extend(hits)
+            st.hits = list(all_hits)  # raw hits are reportable if a later step fails
+            if status.status == "failed" and is_blocked_message(status.error):
+                # Refused (bot protection, 403, rate limit) is not the same as down: say so in the report
+                status = status.model_copy(update={"status": "blocked"})
+            elif status.status == "ok" and status.error:
+                # Some queries answered and some failed: the source worked, but not completely
+                status = status.model_copy(update={"status": "partial"})
+            source_statuses.append(status)
+            completed += 1
+            if status.status in ("failed", "blocked", "partial"):
+                _note(scan_id, "WARN", f"source {status.name}: {status.status} — {status.error}")
+                warn(f"source {status.name} {status.status}: {status.error}")
+            elif status.status == "skipped":
+                _note(scan_id, "INFO", f"source {status.name}: skipped — {status.error}")
+            if status.raw_results:
+                _note(scan_id, "INFO", f"source {status.name}: kept {status.results} of {status.raw_results} hits (per-query cap)")
 
-        # Start icon prefetch immediately for this batch — runs in background
-        if hits:
-            prefetch_tasks.append(asyncio.create_task(_prefetch_icons(hits)))
+            # Start icon prefetch immediately for this batch — runs in background
+            if hits:
+                prefetch_tasks.append(asyncio.create_task(_prefetch_icons(hits)))
 
-        await status_store.set_progress(redis_client, scan_id, 5 + int((completed / total) * 70))
-        await status_store.update_sources(redis_client, scan_id, source_statuses)
+            await status_store.set_progress(redis_client, scan_id, 5 + int((completed / total) * 70))
+            await status_store.update_sources(redis_client, scan_id, source_statuses)
+    finally:
+        # A scan stopped by its time limit cancels the sources still running instead of leaving them behind
+        for task in tasks:
+            task.cancel()
 
     for message in _official_listing_warnings(request, all_hits, source_statuses):
         warn(message)
@@ -337,6 +435,7 @@ async def _pipeline(scan_id: str, request: ScanRequest, redis_client: aioredis.R
     st.hits = deduped
 
     request = _learn_app_store_sellers(request, deduped)
+    st.request = request
     deduped = await _stamp_play_developers(scan_id, request, deduped)
     st.hits = deduped
 
@@ -344,6 +443,7 @@ async def _pipeline(scan_id: str, request: ScanRequest, redis_client: aioredis.R
     # Official listings stay until after scoring (icon comparison needs them).
     deduped, st.allowlisted = split_allowlisted(deduped, request)
     st.hits = deduped
+    st.stage = "allowlisted"
 
     await status_store.update_meta_field(redis_client, scan_id, phase="scoring")
     await status_store.set_progress(redis_client, scan_id, 85)
@@ -359,39 +459,9 @@ async def _pipeline(scan_id: str, request: ScanRequest, redis_client: aioredis.R
         deduped, request, official_permissions=ctx.official_permissions, icon_cache=icon_cache,
         official_publishers=publishers, dropped=below_threshold,
     )
-    # Hits that scored under the reporting threshold are counted and audited, not silently lost
-    st.suppressed.extend(
-        audit_item(h, f"scored {h.relevance_score}, below the reporting threshold ({min_relevance_for(h)}): "
-                      + (h.reasons[-1] if h.reasons else "weak match"))
-        for h in below_threshold
-    )
-    st.hits = scored
     await status_store.set_progress(redis_client, scan_id, 95)
-
-    scored, official_dropped = drop_official(scored)
-    st.allowlisted = st.allowlisted + official_dropped
-
-    # Hits that deeper inspection pushed under the reporting threshold are removed, with the reason kept
-    def _suppress_low(hits: list[Hit]) -> list[Hit]:
-        threshold = min_relevance()
-        kept = [h for h in hits if h.relevance_score >= threshold]
-        st.suppressed.extend(
-            audit_item(h, h.reasons[-1] if h.reasons else "scored below the reporting threshold")
-            for h in hits if h.relevance_score < threshold
-        )
-        return kept
-
-    scored = _suppress_low(scored)
-    scored, mirror_dupes = group_mirrors(scored)
-    st.suppressed.extend(mirror_dupes)
-    st.hits = scored
-
-    # What each lookalike domain actually serves re-ranks it (brand bait up; parked, blank, neutral and unreachable pages drop out). The check was
-    # made during discovery and kept on the hit, so it runs whether or not evidence files are saved.
-    scored = [apply_page_assessment(h) for h in scored]
-    scored = _suppress_low(scored)  # lookalike domains serving nothing suspicious now sit under the threshold
-    scored.sort(key=lambda h: h.relevance_score, reverse=True)
-    st.hits = scored
+    _rank(st, scored, below_threshold)
+    scored = st.hits
 
     # Evidence files are optional. When they are wanted, the riskiest hits get them first: lookalike domains and
     # hits that offer an APK, then score. Otherwise a popular brand's own pages fill the slots.

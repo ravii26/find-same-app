@@ -80,8 +80,8 @@ def _details(**changes):
 
 
 def _details_body():
-    from app.api.routes.brands import DiscoverRequest
-    return DiscoverRequest(**{**BODY, "play_store_url": None, "play_store_urls": [PLAY]}).model_dump()
+    from app.api.routes.brand_details import BrandDetailsRequest
+    return BrandDetailsRequest(**{**BODY, "play_store_url": None, "play_store_urls": [PLAY]}).model_dump()
 
 
 # ── storage functions ─────────────────────────────────────────────────────────
