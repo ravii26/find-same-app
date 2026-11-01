@@ -41,12 +41,10 @@ _DEFAULT_LIMITS: dict[str, float] = {
     "phonepeappstore.com": 1,       # the Indus/PhonePe store's live host
     "apkpure.com": 1,
     "apkmirror.com": 1,
-    "apkcombo.com": 1,
     "apkfab.com": 1,
     "apk4fun.com": 1,
     "apkkit.com": 1,
     "apkboat.io": 1,
-    "happymod.com": 1,
     "softonic.com": 1,
     "taptap.io": 1,
     "_default": 2,

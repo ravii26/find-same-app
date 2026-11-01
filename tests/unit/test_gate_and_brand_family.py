@@ -117,3 +117,41 @@ def test_a_store_domain_is_not_scored_as_a_lookalike_domain():
 def test_a_lookalike_web_domain_is_still_scored():
     _, reasons = _score("https://phonepe-kyc.com/login", "lookalike_domain")
     assert any("domain" in r for r in reasons)
+
+
+# ── 3. The real app on a mirror site, and links to the brand's own Play listing ──
+
+
+def test_the_official_app_on_a_mirror_ranks_under_high_risk():
+    from app.services.scoring import _cap_official_copy, high_risk_threshold
+
+    mirror = _hit(app_name="PhonePe UPI - Free Finance App", package_id="com.phonepe.app", publisher=None,
+                  url="https://www.apk4fun.com/apps/com.phonepe.app/", relevance_score=74,
+                  host=HostInfo(group="apk_site", name="APK4Fun", domain="apk4fun.com"))
+    capped = _cap_official_copy(mirror, PHONEPE, frozenset({"phonepe"}))
+    assert capped.relevance_score < high_risk_threshold()
+    assert capped.relevance_score >= min_relevance_for(capped)  # still reported, for review
+    assert "most likely a mirror" in capped.reasons[-1]
+
+
+def test_a_copy_with_another_id_is_not_capped():
+    from app.services.scoring import _cap_official_copy
+
+    fake = _hit(app_name="PhonePe Pro", package_id="com.phonepe.pro", publisher="Someone", relevance_score=80)
+    assert _cap_official_copy(fake, PHONEPE, frozenset({"phonepe"})).relevance_score == 80
+
+
+def test_a_link_to_the_brands_own_play_listing_is_allowlisted():
+    link = _hit(type=HitType.web_page, app_name="PhonePe UPI Payments - Apps on Google Play",
+                url="https://play.google.com/store/apps/details?id=com.phonepe.app&hl=en-CA",
+                host=HostInfo(group="web_search", name="Bing", domain="bing.com"))
+    remaining, allowed = split_allowlisted([link], PHONEPE)
+    assert remaining == [] and "own Google Play listing" in allowed[0].reason
+
+
+def test_a_link_to_someone_elses_play_listing_stays():
+    link = _hit(type=HitType.web_page, app_name="PhonePay - Apps on Google Play",
+                url="https://play.google.com/store/apps/details?id=com.phonepay.android",
+                host=HostInfo(group="web_search", name="Bing", domain="bing.com"))
+    remaining, _ = split_allowlisted([link], PHONEPE)
+    assert len(remaining) == 1

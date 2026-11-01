@@ -121,6 +121,14 @@ def allowlist_reason(
     if domains and registrable_domain(hit.url).lower() in domains:
         return f"domain {registrable_domain(hit.url)} is an official domain"
 
+    # A search result that links to the brand's own Google Play listing (Bing returns these for the brand's name).
+    # Google Play serves a package only to its owner's listing, so the link itself is the brand's.
+    from app.services.discovery import play_package_from_url  # discovery imports this module
+
+    linked = (play_package_from_url(hit.url) or "").lower()
+    if linked and linked in official_ids.get("android", set()):
+        return f"link to the brand's own Google Play listing ({linked})"
+
     return None
 
 

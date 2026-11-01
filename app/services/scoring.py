@@ -554,6 +554,34 @@ def _has_evidence_beyond_name(hit: Hit, request: ScanRequest, official_publisher
     return bool(official_domains and registrable_domain(hit.url) in official_domains)
 
 
+def _cap_official_copy(hit: Hit, request: ScanRequest, official_publishers: set[str] | frozenset[str]) -> Hit:
+    """The brand's own app id on a third-party site, not under the brand's publisher: most likely a mirror of the real
+    app. Its signing certificate is not checked, so it is not cleared, but it ranks under high risk with that reason.
+
+    Applied after the icon and permission bonuses: a mirror carries the official icon, which would otherwise lift it
+    straight back to the top.
+    """
+    from app.services.allowlist import _norm_publisher, _platform
+
+    pkg = (hit.package_id or "").strip().lower()
+    if not pkg or hit.is_official_match or (hit.host and hit.host.is_official_store):
+        return hit
+    if pkg not in request.official_app_ids()[_platform(hit)]:
+        return hit
+    if hit.publisher and _norm_publisher(hit.publisher) in official_publishers:
+        return hit  # the allowlist decides these
+    cap = int(_load_config()["signals"].get("unverified_official_copy_cap", 55))
+    if hit.relevance_score <= cap:
+        return hit
+    return hit.model_copy(update={
+        "relevance_score": cap,
+        "reasons": hit.reasons + [
+            f"same app id as the official app ({hit.package_id}) on a third-party site: most likely a mirror of the "
+            "real app; its signing certificate is not checked, so it is kept for review"
+        ],
+    })
+
+
 def _gate_name_only(hit: Hit, request: ScanRequest, official_publishers: set[str] | frozenset[str]) -> Hit:
     """Keep a name-only app listing or code repo under the reporting threshold; it stays in the audit list with the reason."""
     if hit.type not in (HitType.app_listing, HitType.repo) or _has_evidence_beyond_name(hit, request, official_publishers):
@@ -594,6 +622,7 @@ async def score_hits(
         scored, request.brand_name, icon_cache=icon_cache, reference_icon_url=reference_icon_url,
     )
 
+    scored = [_cap_official_copy(h, request, official_publishers) for h in scored]
     scored = [_gate_name_only(h, request, official_publishers) for h in scored]
 
     filtered = [h for h in scored if h.relevance_score >= min_relevance_for(h)]

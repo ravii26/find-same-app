@@ -1,7 +1,7 @@
 """A source that cannot be reached must never look like a clean "no results", and must not cost the whole scan.
 
 Covers the three problems found by a live scan:
-  1. Browser scrapers (Samsung, Uptodown) reported `ok, 0 results` when no page loaded.
+  1. Samsung and Uptodown reported `ok, 0 results` when no page loaded (Samsung now reads the store's search API).
   2. Unreachable hosts were retried on every query until the scan hit its time limit.
   3. A scan that stopped early reported its hits unscored and left unfinished sources out of the report
      (now handled by the orchestrator's _rank_unfinished and the per-source limit in SourceAdapter._run).
@@ -20,6 +20,7 @@ import pytest
 from app.api.models import FoundVia, Hit, HitType, HostInfo, ScanContext, ScanRequest, SourceMethod, SourceStatus
 from app.services.keyword_expansion import expand
 from app.sources.base import SourceAdapter, note_page_error
+from app.utils.http_client import BlockedError, FetchError
 
 # ── 1. Browser scrapers report blocked / failed, not ok ───────────────────────
 
@@ -70,7 +71,6 @@ async def _http_403(url):
 
 
 @pytest.mark.parametrize("module, cls", [
-    ("app.sources.samsung_adapter", "SamsungAdapter"),
     ("app.sources.uptodown_adapter", "UptodownAdapter"),
 ])
 @pytest.mark.parametrize("goto, expected", [
@@ -87,6 +87,56 @@ async def test_browser_scraper_that_loads_no_page_is_not_ok(module, cls, goto, e
     assert hits == []
     assert status.status == expected
     assert status.error
+
+
+_SAMSUNG_XML = (
+    '<?xml version="1.0" encoding="UTF-8"?><SamsungProtocol version="7.6"><response id="2040" returnCode="0" '
+    'startNum="1" endNum="20" endOfList="0"><errorInfo><errorString errorCode="0"/></errorInfo>'
+    '<list><value name="productName">PhonePe UPI, Payment, Recharge</value><value name="GUID">com.phonepe.app</value>'
+    '<value name="sellerName">PhonePe</value><value name="productImgUrl">https://img/x.png</value></list>'
+    '<list><value name="productName">PhonePay</value><value name="GUID">com.phonepay.android</value>'
+    '<value name="sellerName">PhonePay Co</value></list></response></SamsungProtocol>'
+)
+
+
+def test_samsung_parses_the_stores_search_reply():
+    from app.sources.samsung_adapter import parse_results
+    apps = parse_results(_SAMSUNG_XML)
+    assert [a["package"] for a in apps] == ["com.phonepe.app", "com.phonepay.android"]
+    assert apps[0]["publisher"] == "PhonePe" and apps[1]["icon"] is None
+
+
+@pytest.mark.parametrize("reply, expected", [
+    (BlockedError("HTTP 403 from https://galaxystore.samsung.com"), "blocked"),
+    (FetchError("Could not connect to galaxystore.samsung.com"), "failed"),
+    ('<SamsungProtocol><response returnCode="1"/></SamsungProtocol>', "failed"),
+    ("<html>not xml", "failed"),
+])
+async def test_samsung_that_gets_no_answer_is_not_ok(reply, expected):
+    from app.sources import samsung_adapter as mod
+
+    async def _fetch(url, **kw):
+        if isinstance(reply, Exception):
+            raise reply
+        return httpx.Response(200, text=reply, headers={"content-type": "application/xml; charset=utf-8"})
+
+    with patch.object(mod, "fetch", _fetch):
+        hits, status = await mod.SamsungAdapter().search(_ctx())
+    assert hits == []
+    assert status.status == expected and status.error
+
+
+async def test_samsung_reports_its_search_results():
+    from app.sources import samsung_adapter as mod
+
+    async def _fetch(url, **kw):
+        return httpx.Response(200, text=_SAMSUNG_XML, headers={"content-type": "application/xml; charset=utf-8"})
+
+    with patch.object(mod, "fetch", _fetch):
+        hits, status = await mod.SamsungAdapter().search(_ctx())
+    assert status.status == "ok"
+    assert {h.package_id for h in hits} == {"com.phonepe.app", "com.phonepay.android"}
+    assert all(h.host.is_official_store for h in hits)
 
 
 def test_note_page_error_sorts_network_blocks_from_other_errors():
