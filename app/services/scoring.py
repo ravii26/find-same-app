@@ -153,8 +153,11 @@ def _score_one(
             score += signals["package_id_suffix_variation"]
             reasons.append("package ID has suffix variation of official ID")
 
-    # Domain similarity — rapidfuzz + TLD checks
-    official_reg = registrable_domain(official_domain) if official_domain else None
+    # Domain similarity — rapidfuzz + TLD checks. Skipped for a listing on a store or APK site: its URL is the
+    # store's domain, not the app's ("phonepeappstore.com" is PhonePe's own store, not a lookalike of phonepe.com).
+    official_reg = (
+        registrable_domain(official_domain) if official_domain and hit_host_group not in _STORE_GROUPS else None
+    )
     if official_reg:
         hit_reg = registrable_domain(hit_url)
         hit_decoded = decode_idn(hit_reg)
@@ -490,6 +493,13 @@ async def _enrich_permission_similarity(
 
 # A store or mirror listing must show evidence beyond its name before it is reported. Unrelated apps that share a
 # brand's common word ("Bob") carry only the name, and that is what floods the report.
+# Host groups whose URLs belong to a store, not to the app listed on it
+_STORE_GROUPS = frozenset({"app_store", "official_store", "apk_site", "code_host"})
+
+# A code repository that ships the brand's APK, or calls itself a fake or clone of it ("Fake-PhonePe-APK")
+_REPO_BAIT_RE = re.compile(r"\b(apk|apks|xapk)\b", re.IGNORECASE)
+_SHORT_BRAND = 5  # compact length at or under which a brand is too common a word to match on "apk" alone
+
 _ICON_MATCH = 0.80   # same pHash level that earns the icon bonus
 _APP_ID_MATCH = 0.85
 # Aliases this short ("BOB") are also everyday words and names, so an app named after one claims nothing
@@ -502,12 +512,20 @@ def _claims_the_brand(hit: Hit, request: ScanRequest) -> bool:
     name, so their publisher, app id and icon are their own and the other evidence never fires for them.
     "Bob World: Super Bro Run Game" only contains the brand and claims neither."""
     name = hit.app_name or hit.title
-    if hit.type != HitType.app_listing or not name:
+    if hit.type not in (HitType.app_listing, HitType.repo) or not name:
         return False
     brands = [request.brand_name, *(a for a in request.brand_aliases if len(compact(a)) >= _MIN_ALIAS_LEN)]
-    if any(is_brand_name(b, name) for b in brands):
+    if hit.type == HitType.app_listing and any(is_brand_name(b, name) for b in brands):
         return True
-    return bool(_BAIT_RE.search(name) or _SCAM_RE.search(name)) and any(exact_in(b, name) for b in brands)
+    # Repo names join words with - and _ ("PhonepeCashback_apk"): split them so word matching works
+    words = re.sub(r"[-_.]+", " ", name)
+    bait = _BAIT_RE.search(words) or _SCAM_RE.search(words)
+    if hit.type == HitType.repo and not bait:
+        # "apk" in a repo name ties it to the brand only for a distinctive brand: a short common word ("Bob")
+        # turns up in repo names by accident ("apk-bob-assistant")
+        distinctive = [b for b in brands if len(compact(b)) > _SHORT_BRAND]
+        return bool(_REPO_BAIT_RE.search(words)) and any(exact_in(b, name) for b in distinctive)
+    return bool(bait) and any(exact_in(b, name) for b in brands)
 
 
 def _has_evidence_beyond_name(hit: Hit, request: ScanRequest, official_publishers: set[str] | frozenset[str]) -> bool:
@@ -516,6 +534,11 @@ def _has_evidence_beyond_name(hit: Hit, request: ScanRequest, official_publisher
     from app.services.allowlist import _norm_publisher
 
     if hit.is_official_match or _claims_the_brand(hit, request):
+        return True
+    # "PhonePay" by "PhonePay Co" as com.phonepay.android: a near-spelling of the brand carried through every field
+    # is a lookalike on purpose, not a coincidence (one coincidental field gives only a weak match)
+    brands = [request.brand_name, *request.brand_aliases]
+    if presence_any(brands, hit.app_name or hit.title, hit.package_id, hit.publisher) == "fuzzy":
         return True
     if hit.publisher and _norm_publisher(hit.publisher) in official_publishers:
         return True

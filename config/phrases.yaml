@@ -30,7 +30,8 @@ default:
     - hack
     - cheats
   lure_words: [mod, cracked, premium, free, hack, cheat, cheats, unlocked, pro, lite]
-  bait_words: [mod, cracked, hack, hacked, cheat, cheats, unlocked, coupon, coupons, promo code, voucher, vouchers]
+  bait_words: [mod, cracked, hack, hacked, cheat, cheats, unlocked, coupon, coupons, promo code, voucher, vouchers,
+               fake, clone, spoof, prank]
   scam_words:
     - reward
     - rewards

@@ -136,6 +136,12 @@ def split_allowlisted(
     declared, official_ids = _declared_packages(request), _official_ids(request)
     domains, publishers, accounts = _domains(request), official_publishers(request), official_accounts(request)
 
+    # An app the store shows under one of the brand's accounts is the brand's own: its package id then counts as an
+    # official id, so the same package on another store or APK site is allowlisted too — still only when that
+    # listing's publisher matches as well (a copy re-uploaded under another name stays a finding).
+    account_ids = _account_verified_ids(hits, accounts)
+    official_ids = {p: official_ids.get(p, set()) | account_ids.get(p, set()) for p in ("android", "ios")}
+
     remaining: list[Hit] = []
     allowed: list[AllowlistedItem] = []
     for h in hits:
@@ -148,6 +154,17 @@ def split_allowlisted(
         else:
             remaining.append(h)
     return remaining, allowed
+
+
+def _account_verified_ids(hits: list[Hit], accounts: dict[str, set[str]]) -> dict[str, set[str]]:
+    """Package ids, per platform, of the hits the store shows under one of the brand's accounts."""
+    ids: dict[str, set[str]] = {"android": set(), "ios": set()}
+    for h in hits:
+        domain = getattr(h.host, "domain", None) if h.host else None
+        developer_id = getattr(h, "developer_id", None)
+        if h.package_id and developer_id and domain and developer_id in accounts.get(domain, set()):
+            ids[_platform(h)].add(h.package_id.strip().lower())
+    return ids
 
 
 def drop_official(hits: list[Hit]) -> tuple[list[Hit], list[AllowlistedItem]]:
