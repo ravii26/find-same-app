@@ -12,7 +12,6 @@ Rate limit: None published; at most one download per day.
 
 from __future__ import annotations
 
-import datetime
 import hashlib
 import json as _json
 import logging
@@ -21,18 +20,15 @@ from pathlib import Path
 from typing import ClassVar
 
 from app.api.models import (
-    FoundVia,
     Hit,
-    HitType,
-    HostInfo,
     ScanContext,
     SourceMethod,
     SourceStatus,
 )
 from app.config.settings import get_settings
-from app.sources.base import SourceAdapter
-from app.utils.http_client import FetchError, fetch
 from app.services.keyword_expansion import fold_homoglyphs
+from app.sources.base import SourceAdapter, scraped_hit
+from app.utils.http_client import FetchError, fetch
 
 log = logging.getLogger(__name__)
 
@@ -136,23 +132,17 @@ class FDroidAdapter(SourceAdapter):
             uid = hashlib.sha256(listing_url.encode()).hexdigest()[:32]
 
             hits.append(
-                Hit(
-                    id=uid,
-                    type=HitType.app_listing,
+                scraped_hit(
+                    self,
+                    brand_fold,
+                    url=listing_url,
+                    host_name="F-Droid",
+                    host_domain="f-droid.org",
+                    hit_id=uid,
                     title=name,
                     app_name=name,
                     package_id=pkg_name,
                     version=info.get("version"),
-                    url=listing_url,
-                    host=HostInfo(
-                        group=self.host_group,
-                        name="F-Droid",
-                        domain="f-droid.org",
-                        is_official_store=False,
-                    ),
-                    found_via=[FoundVia(source=self.name, method=self.method, query=brand_fold)],
-                    relevance_score=0,
-                    discovered_at=datetime.datetime.now(datetime.timezone.utc),
                 )
             )
 

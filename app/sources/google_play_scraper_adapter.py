@@ -9,24 +9,20 @@ Runs the blocking library calls in a thread pool to keep the event loop free.
 from __future__ import annotations
 
 import asyncio
-import datetime
 import hashlib
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 
 from app.api.models import (
-    FoundVia,
     Hit,
-    HitType,
-    HostInfo,
     ScanContext,
     SourceMethod,
     SourceStatus,
 )
 from app.services.brand_match import brand_terms
+from app.sources.base import SourceAdapter, country_label, scan_countries, scraped_hit
 from app.utils.http_client import call_with_backoff
-from app.sources.base import SourceAdapter, country_label, scan_countries
 
 log = logging.getLogger(__name__)
 
@@ -182,9 +178,14 @@ class GooglePlayScraperAdapter(SourceAdapter):
 
             is_official = bool(android_package and pkg == android_package)
 
-            hits.append(Hit(
-                id=uid,
-                type=HitType.app_listing,
+            hits.append(scraped_hit(
+                self,
+                r.get("_term") or (terms[0] if terms else ""),
+                url=url,
+                host_name="Google Play",
+                host_domain="play.google.com",
+                is_official_store=True,
+                hit_id=uid,
                 title=r.get("title"),
                 app_name=r.get("title"),
                 package_id=pkg,
@@ -192,20 +193,7 @@ class GooglePlayScraperAdapter(SourceAdapter):
                 publisher=r.get("developer"),
                 icon_url=r.get("icon") or None,
                 description=(r.get("description") or "")[:1000] or None,
-                url=url,
                 is_official_match=is_official,
-                host=HostInfo(
-                    group=self.host_group,
-                    name="Google Play",
-                    domain="play.google.com",
-                    is_official_store=True,
-                ),
-                # The term that actually found it, so the per-query result cap applies per search,
-                # not to every Play result combined.
-                found_via=[FoundVia(source=self.name, method=self.method,
-                                    query=r.get("_term") or (terms[0] if terms else ""))],
-                relevance_score=0,
-                discovered_at=datetime.datetime.now(datetime.timezone.utc),
             ))
 
         # Partial failures are reported (and were logged above), not hidden behind a bare "ok".

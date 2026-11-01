@@ -11,22 +11,19 @@ distributed via public GitLab repos.
 
 from __future__ import annotations
 
-import datetime
 import hashlib
 import json as _json
 import logging
 
 from app.api.models import (
-    FoundVia,
     Hit,
     HitType,
-    HostInfo,
     ScanContext,
     SourceMethod,
     SourceStatus,
 )
 from app.config.settings import get_settings
-from app.sources.base import SourceAdapter
+from app.sources.base import SourceAdapter, scraped_hit
 from app.utils.http_client import BlockedError, FetchError, fetch
 
 log = logging.getLogger(__name__)
@@ -96,24 +93,18 @@ class GitLabAdapter(SourceAdapter):
                 group = "apk_site" if is_apk_repo else self.host_group
 
                 hits.append(
-                    Hit(
-                        id=uid,
-                        type=HitType.repo,
-                        title=repo_name,                         # full title for display
-                        app_name=path_slug or repo_name,         # slug for scoring (shorter → better WRatio)
-                        publisher=item.get("namespace", {}).get("path"),
+                    scraped_hit(
+                        self,
+                        q,
                         url=repo_url,
-                        host=HostInfo(
-                            group=group,
-                            name="GitLab",
-                            domain="gitlab.com",
-                            is_official_store=False,
-                        ),
-                        found_via=[
-                            FoundVia(source=self.name, method=self.method, query=q)
-                        ],
-                        relevance_score=0,
-                        discovered_at=datetime.datetime.now(datetime.timezone.utc),
+                        host_name="GitLab",
+                        host_domain="gitlab.com",
+                        group=group,
+                        hit_id=uid,
+                        hit_type=HitType.repo,
+                        title=repo_name,
+                        app_name=path_slug or repo_name,
+                        publisher=item.get("namespace", {}).get("path"),
                     )
                 )
 

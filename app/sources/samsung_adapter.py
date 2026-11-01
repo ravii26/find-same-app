@@ -7,49 +7,24 @@ app listings. The host needs `playwright install chromium`.
 
 from __future__ import annotations
 
-import datetime
 import hashlib
 import logging
-import re
 from urllib.parse import quote_plus
 
 from app.api.models import (
-    FoundVia,
     Hit,
-    HitType,
-    HostInfo,
     ScanContext,
     SourceMethod,
     SourceStatus,
 )
-from app.sources.base import SourceAdapter
-
+from app.sources.base import SourceAdapter, embedded_package, scraped_hit
+from app.utils.browser import browser_context
 from app.utils.http_client import throttle
 
 log = logging.getLogger(__name__)
 
-try:
-    from playwright.async_api import async_playwright as _async_playwright
-    _PLAYWRIGHT_OK = True
-except ImportError:
-    _async_playwright = None  # type: ignore[assignment]
-    _PLAYWRIGHT_OK = False
 
-_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-)
 # Package names embedded in Galaxy Store URLs: /detail/G000XXXXXX or data attrs
-_PKG_RE = re.compile(r'\b((?:com|net|org|in|io|co)\.[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]+)+)\b')
-_DOMAIN_TLDS = {".com", ".net", ".org", ".io", ".co", ".in"}
-
-
-def _pkg_from_text(text: str) -> str:
-    for m in _PKG_RE.finditer(text):
-        pkg = m.group(1)
-        if not any(pkg.endswith(t) for t in _DOMAIN_TLDS):
-            return pkg
-    return ""
 
 
 class SamsungAdapter(SourceAdapter):
@@ -59,14 +34,6 @@ class SamsungAdapter(SourceAdapter):
     max_results = 10  # official store — expect 1 official app + a few lookalikes
 
     async def search(self, ctx: ScanContext) -> tuple[list[Hit], SourceStatus]:
-        if not _PLAYWRIGHT_OK:
-            log.warning("samsung: playwright not installed — adapter unavailable")
-            return [], SourceStatus(
-                name=self.name, method=self.method, status="failed",
-                error="playwright not installed — run: pip install playwright && playwright install chromium",
-            )
-
-        async_playwright = _async_playwright
 
         brand_tokens = {t.lower() for t in ctx.request.brand_name.split() if len(t) >= 3}
         terms = [
@@ -83,22 +50,7 @@ class SamsungAdapter(SourceAdapter):
         seen: set[str] = set()
 
         try:
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=["--no-sandbox", "--disable-dev-shm-usage",
-                          "--disable-gpu", "--no-zygote",
-                          "--disable-blink-features=AutomationControlled"],
-                )
-                bctx = await browser.new_context(
-                    accept_downloads=False,
-                    user_agent=_UA,
-                    viewport={"width": 1280, "height": 900},
-                    locale="en-US",
-                )
-                await bctx.add_init_script(
-                    "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
-                )
+            async with browser_context() as bctx:
 
                 for term in terms:
                     search_url = (
@@ -145,26 +97,18 @@ class SamsungAdapter(SourceAdapter):
                                 log.debug("samsung: failed to read app name for %r: %s", full_url, e)
 
                             # Package name sometimes embedded in data attrs or page source
-                            pkg = _pkg_from_text(href) or _pkg_from_text(content[:8000])
+                            pkg = embedded_package(href) or embedded_package(content[:8000])
 
-                            hits.append(Hit(
-                                id=uid,
-                                type=HitType.app_listing,
+                            hits.append(scraped_hit(
+                                self,
+                                term,
+                                url=full_url,
+                                host_name="Samsung Galaxy Store",
+                                host_domain="galaxystore.samsung.com",
+                                hit_id=uid,
                                 title=name or None,
                                 app_name=name or None,
                                 package_id=pkg or None,
-                                url=full_url,
-                                host=HostInfo(
-                                    group=self.host_group,
-                                    name="Samsung Galaxy Store",
-                                    domain="galaxystore.samsung.com",
-                                    is_official_store=False,
-                                ),
-                                found_via=[FoundVia(
-                                    source=self.name, method=self.method, query=term
-                                )],
-                                relevance_score=0,
-                                discovered_at=datetime.datetime.now(datetime.timezone.utc),
                             ))
 
                     except Exception as e:
@@ -172,7 +116,6 @@ class SamsungAdapter(SourceAdapter):
                     finally:
                         await page.close()
 
-                await browser.close()
 
         except Exception as exc:
             log.warning("samsung: scrape failed: %s", exc)

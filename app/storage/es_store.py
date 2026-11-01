@@ -22,7 +22,8 @@ from __future__ import annotations
 
 import datetime
 import logging
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 from app.api.models import Hit, ScanReport, ScanRequest
 from app.config.settings import Settings, get_settings
@@ -242,7 +243,7 @@ async def index_report(
     settings = get_settings()
     from app.services.scoring import high_risk_threshold
 
-    completed_at = completed_at or datetime.datetime.now(datetime.timezone.utc)
+    completed_at = completed_at or datetime.datetime.now(datetime.UTC)
     client = None
     try:
         from elasticsearch.helpers import async_bulk

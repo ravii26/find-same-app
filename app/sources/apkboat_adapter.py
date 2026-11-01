@@ -8,7 +8,6 @@ App URLs are slugs (/<slug>/) with no package id, so package_id stays empty.
 
 from __future__ import annotations
 
-import datetime
 import hashlib
 import logging
 from urllib.parse import quote_plus
@@ -16,16 +15,13 @@ from urllib.parse import quote_plus
 from selectolax.lexbor import LexborHTMLParser as HTMLParser
 
 from app.api.models import (
-    FoundVia,
     Hit,
-    HitType,
-    HostInfo,
     ScanContext,
     SourceMethod,
     SourceStatus,
 )
 from app.services.keyword_expansion import fold_homoglyphs
-from app.sources.base import SourceAdapter, pkg_queries
+from app.sources.base import SourceAdapter, brand_words, pkg_queries, scraped_hit
 from app.utils.http_client import BlockedError, FetchError, decode_response, fetch
 
 log = logging.getLogger(__name__)
@@ -41,7 +37,7 @@ class APKBoatAdapter(SourceAdapter):
 
     async def search(self, ctx: ScanContext) -> tuple[list[Hit], SourceStatus]:
         brand = ctx.request.brand_name
-        brand_tokens = {t.lower() for t in fold_homoglyphs(brand).split() if len(t) >= 3}
+        brand_tokens = brand_words(brand)
 
         queries = pkg_queries(ctx)
 
@@ -93,22 +89,14 @@ class APKBoatAdapter(SourceAdapter):
                 continue
             seen.add(uid)
 
-            hits.append(Hit(
-                id=uid,
-                type=HitType.app_listing,
-                app_name=name,
-                package_id=None,
-                publisher=None,
+            hits.append(scraped_hit(
+                self,
+                query,
                 url=href,
-                host=HostInfo(
-                    group=self.host_group,
-                    name="APKBoat",
-                    domain="apkboat.io",
-                    is_official_store=False,
-                ),
-                found_via=[FoundVia(source=self.name, method=self.method, query=query)],
-                relevance_score=0,
-                discovered_at=datetime.datetime.now(datetime.timezone.utc),
+                host_name="APKBoat",
+                host_domain="apkboat.io",
+                hit_id=uid,
+                app_name=name,
             ))
 
         return hits

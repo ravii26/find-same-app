@@ -61,6 +61,8 @@ flowchart LR
 | Component | Location | Role |
 |---|---|---|
 | API | `app/main.py`, `app/api/routes/` | Validates requests, stores brands, queues scans, serves status |
+| Scan queue | `app/services/scan_queue.py` | Accepts a scan (dedup, queue-depth limit) and starts pending scans when a slot is free |
+| Redis | `app/storage/status_store.py`, `app/storage/redis_client.py` | Scan state and queues; the connection setup for the API, worker and rate limiter |
 | Worker | `app/jobs/actors.py` | Runs scans (`scans` queue) |
 | Brands | `app/storage/brand_index.py` | Brand details in Elasticsearch; merges a brand into a scan request |
 | Store links | `app/services/discovery.py` | Reads the brand's own store links (`listed_app`) |
@@ -77,9 +79,8 @@ flowchart LR
 | Queue | Consumer | Used for |
 |---|---|---|
 | `scans` | worker | Scan jobs |
-| `webhooks` | worker | Consumed, but nothing sends to it (no webhook is delivered) |
 
-Both the API (embedded worker, when `EMBEDDED_WORKER=true`) and `run.py` start a worker that consumes both queues.
+Both the API (embedded worker, when `EMBEDDED_WORKER=true`) and `run.py` start a worker that consumes the `scans` queue.
 
 ---
 
@@ -449,22 +450,22 @@ Status in the table is from the latest SBI scan (`scn_01M68BXR0V087DGN1HREJXE7XW
 | 3 | GetApps / Xiaomi (`getapps`) | official store | API | Search terms, per storefront | Name, package, publisher, icon | Storefront-specific results | ok, 38 results |
 | 4 | Samsung Galaxy Store (`samsung_galaxy`) | official store | scrape (browser) | Search terms, per storefront | Name, URL, icon | Browser-rendered, slow | ok, 10 results |
 | 5 | Huawei AppGallery (`huawei_appgallery`) | official store | scrape (browser) | Search terms | Name, URL, icon | Browser-rendered | ok, 0 results |
-| 6 | Indus Appstore / PhonePe (`indus_appstore`) | official store | scrape | Search terms | Name, package, URL | Results are PhonePe's catalogue | ok, 10 results |
+| 6 | Indus Appstore / PhonePe (`indus_appstore`) | official store | scrape (browser) | Search terms | Name, package, URL | Results are PhonePe's catalogue | ok, 10 results |
 | 7 | TapTap (`taptap`) | third-party store | scrape | Search terms | Name, URL, icon | Global storefront only | ok, 0 results |
 | 8 | F-Droid (`fdroid`) | open-source store | API | Index file, name match | Name, package, URL | Index is downloaded once per scan | ok, 6 results |
 | 9 | Aptoide (`aptoide`) | APK site | API | Search terms | Name, package, publisher, URL | 36 results per scan | ok, 36 results |
 | 10 | APKPure (`apkpure`) | APK site | scrape | Search terms | Name, URL | Returns HTTP 403 | blocked, 0 results |
 | 11 | APKMirror (`apkmirror`) | APK site | RSS feed | Search terms | Name, URL | Feed may return 403 | ok, 0 results |
-| 12 | APKCombo (`apkcombo`) | APK site | scrape | Search terms | Name, URL | DNS fails from the test machine | failed, DNS |
-| 13 | APKFab (`apkfab`) | APK site | scrape | Search terms | Name, URL | Returns HTTP 403 | blocked, 403 |
-| 14 | APK4Fun (`apk4fun`) | APK site | scrape | Search terms | Name, URL | Results may need the browser | ok, 0 results |
-| 15 | APKKit (`apkkit`) | APK site | scrape | Search terms | Name, URL | Results may need the browser | ok, 1 result |
+| 12 | APKCombo (`apkcombo`) | APK site | scrape (browser) | Search terms | Name, URL | DNS fails from the test machine | failed, DNS |
+| 13 | APKFab (`apkfab`) | APK site | scrape (browser) | Search terms | Name, URL | Returns HTTP 403 | blocked, 403 |
+| 14 | APK4Fun (`apk4fun`) | APK site | scrape (browser) | Search terms | Name, URL | Browser-rendered | ok, 0 results |
+| 15 | APKKit (`apkkit`) | APK site | scrape (browser) | Search terms | Name, URL | Browser-rendered | ok, 1 result |
 | 16 | APKBoat (`apkboat`) | APK site | scrape | Search terms | Name, URL | Plain HTTP | ok, 0 results |
 | 17 | Softonic (`softonic`) | APK site | scrape | Search terms | Name, per-app subdomain URL | Returns HTTP 406 at times | blocked, 406 |
 | 18 | HappyMod (`happymod`) | APK site | scrape (browser) | Search terms | Name, URL | DNS fails from the test machine | failed, DNS |
 | 19 | Uptodown (`uptodown`) | APK site | scrape (browser) | Search terms | Name, URL | Browser-rendered | ok, 27 results |
-| 20 | Bing (`bing`) | web search | scrape | Search templates, per storefront market | URL, title, snippet | Results vary between runs. Market changes results. | ok, 42 results |
-| 21 | DuckDuckGo (`duckduckgo`) | web search | scrape | Search terms | URL, title, snippet | CAPTCHA when the IP is blocked | blocked, CAPTCHA |
+| 20 | Bing (`bing`) | web search | scrape (browser) | Search templates, per storefront market | URL, title, snippet | Results vary between runs. Market changes results. | ok, 42 results |
+| 21 | DuckDuckGo (`duckduckgo`) | web search | scrape (browser) | Search terms | URL, title, snippet | CAPTCHA when the IP is blocked | blocked, CAPTCHA |
 | 22 | Lookalike domains (`lookalike_domains`) | domains | scrape | Generated domains from the official domain | Domain, page assessment | Needs `official_domain`. Only domains that resolve are reported. | ok, 0 results |
 | 23 | GitHub (`github`) | code host | API | Search terms with `apk` | Repository name, URL | Rate limits without a token | ok, 0 results |
 | 24 | GitLab (`gitlab`) | code host | API | Search terms | Repository name, URL | Rate limits without a token | ok, 0 results |
@@ -475,6 +476,8 @@ Status in the table is from the latest SBI scan (`scn_01M68BXR0V087DGN1HREJXE7XW
 **Note on the list.** An earlier version of this README listed "Samsung Galaxy Store" and "Huawei AppGallery" as browser sources. Both are still browser sources. The browser is used only when plain HTTP returns no results.
 
 **Rate limiting.** Every outgoing request goes through `throttle()` (`app/utils/http_client.py`), which uses the per-host Redis limiter. Default is 2 requests per second per host, with store and APK sites at 1 per second. A 429 is retried with `Retry-After` (up to 30 seconds). Downloads are disabled in the browser.
+
+**Browser.** A scan starts at most one headless Chromium, the first time a source or evidence capture needs one, and closes it when the scan ends (`app/utils/browser.py`, `scan_browser()`). Each page load gets its own browser context, so no cookies or storage carry over. A scan that uses no browser starts none.
 
 ---
 
@@ -734,7 +737,7 @@ The labels are a judgement made from the names and packages. They are not checke
 .venv312/bin/python -m pytest tests/unit -q -p no:cacheprovider --ignore tests/unit/test_csv_injection.py --ignore tests/unit/test_url_tools.py
 ```
 
-Latest run: 304 passed, 26 failed. The 26 failures are in older test files that call functions and attributes no longer in the code (`ScanReport.sources`, `_get_redis`, `webhook_actor`, `default_country_list`, `progress_cb`, `callback_url`, `depth`, older rate-limiter and adapter internals). Two test files were excluded because they import functions that no longer exist: `test_csv_injection.py` and `test_url_tools.py`.
+Latest run: 296 passed, 23 failed. The 23 failures are in older test files that call functions and attributes no longer in the code (`ScanReport.sources`, `_get_redis`, `default_country_list`, `progress_cb`, `depth`, older rate-limiter and adapter internals). Two test files were excluded because they import functions that no longer exist: `test_csv_injection.py` and `test_url_tools.py`.
 
 `tests/integration/` calls `status_store` functions that no longer exist (`get_dedup`, `add_to_running`, `get_progress`). Those tests fail and are not part of the run above.
 

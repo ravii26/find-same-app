@@ -8,22 +8,19 @@ Rate limits: Unauth: 10/min search, 60/hr general. Auth: 30/min search, 5000/hr.
 
 from __future__ import annotations
 
-import datetime
 import hashlib
 import json as _json
 import logging
 
 from app.api.models import (
-    FoundVia,
     Hit,
     HitType,
-    HostInfo,
     ScanContext,
     SourceMethod,
     SourceStatus,
 )
 from app.config.settings import get_settings
-from app.sources.base import SourceAdapter
+from app.sources.base import SourceAdapter, scraped_hit
 from app.utils.http_client import BlockedError, FetchError, fetch
 
 log = logging.getLogger(__name__)
@@ -84,22 +81,18 @@ class GitHubAdapter(SourceAdapter):
                 is_apk_repo = "apk" in repo_name.lower()
                 group = "apk_site" if is_apk_repo else self.host_group
                 hits.append(
-                    Hit(
-                        id=uid,
-                        type=HitType.repo,
+                    scraped_hit(
+                        self,
+                        q,
+                        url=repo_url,
+                        host_name="GitHub",
+                        host_domain="github.com",
+                        group=group,
+                        hit_id=uid,
+                        hit_type=HitType.repo,
                         title=full_name,
                         app_name=repo_name,
                         publisher=item.get("owner", {}).get("login"),
-                        url=repo_url,
-                        host=HostInfo(
-                            group=group,
-                            name="GitHub",
-                            domain="github.com",
-                            is_official_store=False,
-                        ),
-                        found_via=[FoundVia(source=self.name, method=self.method, query=q)],
-                        relevance_score=0,
-                        discovered_at=datetime.datetime.now(datetime.timezone.utc),
                     )
                 )
 

@@ -21,16 +21,6 @@ def _norm(text: str) -> str:
     return text.lower().translate(_HOMOGLYPH_MAP)
 
 
-def jaro_winkler(a: str, b: str) -> float:
-    """Jaro-Winkler similarity (0.0–1.0) on homoglyph-normalised strings."""
-    import jellyfish
-
-    a, b = _norm(a or ""), _norm(b or "")
-    if not a or not b:
-        return 0.0
-    return jellyfish.jaro_winkler_similarity(a, b)
-
-
 def domain_lookalike(candidate_url: str, official_domains: list[str]) -> float:
     """Return 0.0–1.0 JW similarity between candidate's registered domain label
     and any official domain label.  Returns 0.0 when the domain IS official

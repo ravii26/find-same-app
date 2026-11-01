@@ -3,11 +3,11 @@
 
 from __future__ import annotations
 
-from app.sources.apkcombo_adapter import APKComboAdapter
 from app.sources.apk4fun_adapter import APK4FunAdapter
 from app.sources.apkboat_adapter import APKBoatAdapter
-from app.sources.apkkit_adapter import APKKitAdapter
+from app.sources.apkcombo_adapter import APKComboAdapter
 from app.sources.apkfab_adapter import APKFabAdapter
+from app.sources.apkkit_adapter import APKKitAdapter
 from app.sources.apkmirror_adapter import APKMirrorAdapter
 from app.sources.apkpure_adapter import APKPureAdapter
 from app.sources.aptoide_adapter import AptoideAdapter

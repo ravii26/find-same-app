@@ -10,16 +10,12 @@ visit needed, which keeps this adapter fast.
 
 from __future__ import annotations
 
-import datetime
 import hashlib
 import logging
 import re
 
 from app.api.models import (
-    FoundVia,
     Hit,
-    HitType,
-    HostInfo,
     ScanContext,
     SourceMethod,
     SourceStatus,
@@ -27,22 +23,18 @@ from app.api.models import (
 from app.services.keyword_expansion import fold_homoglyphs
 from app.sources.base import (
     SourceAdapter,
+    brand_words,
     is_network_block,
     page_problem,
     says_no_results,
     scrape_status,
+    scraped_hit,
 )
-
+from app.utils.browser import browser_context
 from app.utils.http_client import throttle
 
 log = logging.getLogger(__name__)
 
-try:
-    from playwright.async_api import async_playwright as _async_playwright
-    _PLAYWRIGHT_OK = True
-except ImportError:
-    _async_playwright = None  # type: ignore[assignment]
-    _PLAYWRIGHT_OK = False
 
 _BASE = "https://apkpure.com"
 _SEARCH = "https://apkpure.com/search?q={q}"
@@ -53,10 +45,6 @@ _PKG_RE = re.compile(
     re.IGNORECASE,
 )
 
-_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-)
 
 
 def _pkg_from_url(url: str) -> str | None:
@@ -79,17 +67,9 @@ class APKPureAdapter(SourceAdapter):
     host_group = "apk_site"
 
     async def search(self, ctx: ScanContext) -> tuple[list[Hit], SourceStatus]:
-        if not _PLAYWRIGHT_OK:
-            log.warning("apkpure: playwright not installed — adapter unavailable")
-            return [], SourceStatus(
-                name=self.name, method=self.method, status="failed",
-                error="playwright not installed — run: pip install playwright && playwright install chromium",
-            )
-
-        async_playwright = _async_playwright
 
         brand = ctx.request.brand_name
-        brand_tokens = {t.lower() for t in fold_homoglyphs(brand).split() if len(t) >= 3}
+        brand_tokens = brand_words(brand)
 
         # Queries: brand name + last package component if different
         queries: list[str] = [brand]
@@ -105,25 +85,7 @@ class APKPureAdapter(SourceAdapter):
         blocked: list[str] = []
 
         try:
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=[
-                        "--no-sandbox",
-                        "--disable-dev-shm-usage",
-                        "--disable-gpu",
-                        "--disable-blink-features=AutomationControlled",
-                    ],
-                )
-                bctx = await browser.new_context(
-                    accept_downloads=False,
-                    user_agent=_UA,
-                    viewport={"width": 1280, "height": 800},
-                    locale="en-US",
-                )
-                await bctx.add_init_script(
-                    "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
-                )
+            async with browser_context() as bctx:
 
                 for q in queries[:2]:
                     page = await bctx.new_page()
@@ -235,25 +197,17 @@ class APKPureAdapter(SourceAdapter):
                             except Exception as e:
                                 log.debug("apkpure: failed to read icon for %r: %s", full_url, e)
 
-                            hits.append(Hit(
-                                id=uid,
-                                type=HitType.app_listing,
+                            hits.append(scraped_hit(
+                                self,
+                                q,
+                                url=full_url,
+                                host_name="APKPure",
+                                host_domain="apkpure.com",
+                                hit_id=uid,
                                 app_name=name,
                                 package_id=pkg_id,
                                 publisher=publisher,
                                 icon_url=icon_url,
-                                url=full_url,
-                                host=HostInfo(
-                                    group=self.host_group,
-                                    name="APKPure",
-                                    domain="apkpure.com",
-                                    is_official_store=False,
-                                ),
-                                found_via=[
-                                    FoundVia(source=self.name, method=self.method, query=q)
-                                ],
-                                relevance_score=0,
-                                discovered_at=datetime.datetime.now(datetime.timezone.utc),
                             ))
 
                     except Exception as e:
@@ -262,7 +216,6 @@ class APKPureAdapter(SourceAdapter):
                     finally:
                         await page.close()
 
-                await browser.close()
 
         except Exception as exc:
             log.warning("apkpure: scrape failed: %s", exc)

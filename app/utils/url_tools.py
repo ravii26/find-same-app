@@ -9,7 +9,6 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import tldextract
 
-
 log = logging.getLogger(__name__)
 
 # Tracking parameter prefixes to strip from URLs before deduplication

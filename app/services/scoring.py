@@ -12,10 +12,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 from rapidfuzz import fuzz
@@ -415,7 +415,11 @@ async def _enrich_permission_similarity(
 
     from app.services.play_listing import (
         android_excess_dangerous as excess_dangerous,
+    )
+    from app.services.play_listing import (
         android_permission_jaccard as permission_jaccard,
+    )
+    from app.services.play_listing import (
         fetch_permissions,
     )
 

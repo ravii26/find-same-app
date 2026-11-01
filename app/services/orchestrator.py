@@ -20,15 +20,14 @@ import redis.asyncio as aioredis
 
 from app.api.models import (
     Hit,
-    ScanQuery,
     ScanContext,
+    ScanQuery,
     ScanReport,
     ScanRequest,
     ScanSummary,
     SourceMethod,
     SourceStatus,
 )
-from app.utils.http_client import is_blocked_message
 from app.config.settings import get_settings
 from app.services.allowlist import (
     APP_STORE_DOMAIN,
@@ -43,14 +42,16 @@ from app.services.deduplicator import deduplicate, group_mirrors
 from app.services.keyword_expansion import expand
 from app.services.scoring import (
     apply_page_assessment,
-    min_relevance_for,
     min_relevance,
+    min_relevance_for,
     ruleset_version,
     score_hit,
     score_hits,
 )
 from app.sources.registry import get_all_adapters
 from app.storage import scan_log, status_store
+from app.utils.browser import scan_browser
+from app.utils.http_client import is_blocked_message
 
 log = logging.getLogger(__name__)
 
@@ -83,11 +84,13 @@ async def run_scan(scan_id: str, request: ScanRequest, redis_client: aioredis.Re
     """
     settings = get_settings()
     t0 = time.monotonic()
-    st = _State(started_at=datetime.datetime.now(datetime.timezone.utc), request=request)
+    st = _State(started_at=datetime.datetime.now(datetime.UTC), request=request)
     error: str | None = None
     try:
-        await asyncio.wait_for(_pipeline(scan_id, request, redis_client, st), settings.scan_ceiling_seconds())
-    except asyncio.TimeoutError:
+        # One Chromium for the whole scan: started by the first source that needs it, closed when the scan ends
+        async with scan_browser():
+            await asyncio.wait_for(_pipeline(scan_id, request, redis_client, st), settings.scan_ceiling_seconds())
+    except TimeoutError:
         error = f"scan timed out after {settings.scan_ceiling_seconds()}s"
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"

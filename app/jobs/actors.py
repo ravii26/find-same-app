@@ -1,12 +1,12 @@
 # app/jobs/actors.py
 """
-Dramatiq actors for scan execution and webhook delivery.
+Dramatiq actor for scan execution.
 
 Two-queue model:
 - Queue 1 (pending): Redis list of scans waiting for a slot (status_store).
 - Queue 2 (running): Redis set capped at MAX_CONCURRENT_SCANS. Only scans in it are handed to Dramatiq
   (queue "scans"), so a message in Dramatiq always has a slot and is never retried or dropped for lack of one.
-- When a scan finishes it leaves queue 2 and `promote_pending()` moves the next pending scan in.
+- When a scan finishes it leaves queue 2 and `scan_queue.promote_pending()` moves the next pending scan in.
 """
 
 from __future__ import annotations
@@ -22,7 +22,9 @@ from app.api.models import ScanRequest, ScanStatus
 from app.config.settings import get_settings
 from app.jobs.broker import get_broker
 from app.services.orchestrator import run_scan
+from app.services.scan_queue import promote_pending
 from app.storage import result_store, scan_log, status_store
+from app.storage.redis_client import worker_client
 from app.utils.http_client import close_client, close_rate_limiter
 
 log = logging.getLogger(__name__)
@@ -33,33 +35,8 @@ get_broker()
 _HEARTBEAT_SECONDS = 30
 
 
-def _make_redis() -> aioredis.Redis:
-    """Create a fresh Redis client bound to the current event loop.
-
-    Each scan runs inside asyncio.run() which creates and then closes its own
-    event loop. aioredis connections are loop-bound, so a client cannot be
-    shared across scans — each scan must own its own client and close it before
-    asyncio.run() exits.
-    """
-    return aioredis.Redis.from_url(
-        get_settings().redis_url, max_connections=5, decode_responses=False
-    )
-
-
 def _now() -> datetime.datetime:
-    return datetime.datetime.now(datetime.timezone.utc)
-
-
-async def promote_pending(redis: aioredis.Redis) -> None:
-    """Fill free slots of the running queue from the pending queue and hand those scans to the worker."""
-    for scan_id in await status_store.reap_lost(redis):
-        scan_log.append_sync(get_settings().scan_log_path(scan_id), scan_id, "ERROR", "worker lost; scan abandoned")
-    for scan_id in await status_store.promote(redis):
-        request_dict = await status_store.take_request(redis, scan_id)
-        if request_dict is None:  # deleted while pending
-            await status_store.remove_from_running(redis, scan_id)
-            continue
-        scan_actor.send(scan_id, request_dict)
+    return datetime.datetime.now(datetime.UTC)
 
 
 @dramatiq.actor(queue_name="scans", max_retries=0, time_limit=get_settings().scan_ceiling_seconds() * 1000 + 120_000)
@@ -106,7 +83,7 @@ def _indexing_problem(indexed: dict | None) -> str | None:
 
 async def _execute_scan(scan_id: str, request_dict: dict) -> None:
     settings = get_settings()
-    redis = _make_redis()
+    redis = worker_client()  # its own client: this scan's event loop closes with it
     log_path = settings.scan_log_path(scan_id)
     beat = asyncio.create_task(_heartbeat(redis, scan_id))
     try:

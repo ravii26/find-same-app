@@ -13,27 +13,22 @@ to retrieve the signing certificate SHA-1 without downloading the APK.
 
 from __future__ import annotations
 
-import datetime
 import hashlib
 import json as _json
 import logging
 
 from app.api.models import (
-    FoundVia,
     Hit,
-    HitType,
-    HostInfo,
     ScanContext,
     SourceMethod,
     SourceStatus,
 )
 from app.services.brand_match import brand_terms
-from app.sources.base import SourceAdapter
+from app.sources.base import SourceAdapter, scraped_hit
 from app.utils.http_client import FetchError, fetch
 
 log = logging.getLogger(__name__)
 
-_META_BASE = "https://ws75.aptoide.com/api/7/app/getMeta"
 
 
 
@@ -85,9 +80,13 @@ class AptoideAdapter(SourceAdapter):
                 file_obj = item.get("file") or {}
 
                 hits.append(
-                    Hit(
-                        id=uid,
-                        type=HitType.app_listing,
+                    scraped_hit(
+                        self,
+                        term,
+                        url=listing_url,
+                        host_name="Aptoide",
+                        host_domain="aptoide.com",
+                        hit_id=uid,
                         title=item.get("name"),
                         app_name=item.get("name"),
                         package_id=pkg,
@@ -95,16 +94,6 @@ class AptoideAdapter(SourceAdapter):
                         publisher=(item.get("developer") or {}).get("name"),
                         icon_url=item.get("icon") or None,
                         apk_url=file_obj.get("path") or file_obj.get("path_alt") or None,
-                        url=listing_url,
-                        host=HostInfo(
-                            group=self.host_group,
-                            name="Aptoide",
-                            domain="aptoide.com",
-                            is_official_store=False,
-                        ),
-                        found_via=[FoundVia(source=self.name, method=self.method, query=term)],
-                        relevance_score=0,
-                        discovered_at=datetime.datetime.now(datetime.timezone.utc),
                     )
                 )
 

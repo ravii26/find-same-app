@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import json as _json
 import logging
 from urllib.parse import quote_plus
 
@@ -25,7 +26,6 @@ from app.api.models import (
 from app.services.brand_match import brand_terms
 from app.sources.base import SourceAdapter, country_label, scan_countries
 from app.utils.http_client import fetch
-import json as _json
 
 log = logging.getLogger(__name__)
 
@@ -82,7 +82,7 @@ class ItunesAdapter(SourceAdapter):
                         found_via=[FoundVia(source=self.name, method=self.method, query=term)],
                         relevance_score=0,
                         is_official_match=is_official,
-                        discovered_at=datetime.datetime.now(datetime.timezone.utc),
+                        discovered_at=datetime.datetime.now(datetime.UTC),
                     )
                 )
 
