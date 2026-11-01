@@ -582,6 +582,26 @@ def _cap_official_copy(hit: Hit, request: ScanRequest, official_publishers: set[
     })
 
 
+def _raise_brand_repo(hit: Hit, request: ScanRequest) -> Hit:
+    """A code repository that presents itself as the brand's APK, or as a fake or clone of it ("Fake-PhonePe-APK",
+    "phonepe-sound-box-working-apk"), is distributing or building an impersonation: ranked as high risk.
+
+    Name similarity alone keeps such repos in "review": a repo has no package id, publisher or icon to add points. A
+    repo that only mentions the brand ("phonepe-notes") does not claim it and keeps its score.
+    """
+    if hit.type != HitType.repo or not _claims_the_brand(hit, request):
+        return hit
+    floor = int(_load_config()["signals"].get("brand_repo_floor", high_risk_threshold()))
+    if hit.relevance_score >= floor:
+        return hit
+    return hit.model_copy(update={
+        "relevance_score": floor,
+        "reasons": hit.reasons + [
+            "code repository presents itself as the brand's APK or as a fake or clone of it: ranked as high risk"
+        ],
+    })
+
+
 def _gate_name_only(hit: Hit, request: ScanRequest, official_publishers: set[str] | frozenset[str]) -> Hit:
     """Keep a name-only app listing or code repo under the reporting threshold; it stays in the audit list with the reason."""
     if hit.type not in (HitType.app_listing, HitType.repo) or _has_evidence_beyond_name(hit, request, official_publishers):
@@ -624,6 +644,7 @@ async def score_hits(
 
     scored = [_cap_official_copy(h, request, official_publishers) for h in scored]
     scored = [_gate_name_only(h, request, official_publishers) for h in scored]
+    scored = [_raise_brand_repo(h, request) for h in scored]
 
     filtered = [h for h in scored if h.relevance_score >= min_relevance_for(h)]
     if dropped is not None:

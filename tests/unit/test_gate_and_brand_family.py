@@ -155,3 +155,36 @@ def test_a_link_to_someone_elses_play_listing_stays():
                 host=HostInfo(group="web_search", name="Bing", domain="bing.com"))
     remaining, _ = split_allowlisted([link], PHONEPE)
     assert len(remaining) == 1
+
+
+# ── 4. Repositories that impersonate the brand rank as high risk ─────────────
+
+
+def test_a_repo_that_claims_the_brand_is_raised_to_high_risk():
+    from app.services.scoring import _raise_brand_repo, high_risk_threshold
+
+    for name in ("Fake-PhonePe-APK", "phonepe-sound-box-working-apk", "Phonepe-apk", "phonepe-clone"):
+        raised = _raise_brand_repo(_repo(name).model_copy(update={"relevance_score": 38}), PHONEPE)
+        assert raised.relevance_score >= high_risk_threshold(), name
+        assert "high risk" in raised.reasons[-1]
+
+
+def test_a_repo_that_only_mentions_the_brand_is_not_raised():
+    from app.services.scoring import _raise_brand_repo
+
+    assert _raise_brand_repo(_repo("phonepe-notes"), PHONEPE).relevance_score == 50
+
+
+def test_a_short_common_brand_word_in_a_repo_is_not_raised():
+    from app.services.scoring import _raise_brand_repo
+
+    bob = ScanRequest(brand_name="Bob", android_packages=["com.bankofbaroda.mconnect"])
+    repo = _repo("apk-bob-assistant").model_copy(update={"relevance_score": 40})
+    assert _raise_brand_repo(repo, bob).relevance_score == 40
+
+
+def test_an_app_listing_is_never_raised_by_the_repo_rule():
+    from app.services.scoring import _raise_brand_repo
+
+    app = _hit(app_name="Fake PhonePe APK", title="Fake PhonePe APK", relevance_score=40)
+    assert _raise_brand_repo(app, PHONEPE).relevance_score == 40
