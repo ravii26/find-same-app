@@ -301,23 +301,26 @@ async def test_confirm_keeps_the_linked_apps_even_when_left_out(monkeypatch, bra
 
 async def test_listed_app_reads_publisher_from_a_play_link(monkeypatch):
     async def listing(pkg, cc):
-        return {"developer": "State Bank of India", "title": "YONO SBI"}
+        return {"developer": "State Bank of India", "developerId": "State+Bank+of+India", "title": "YONO SBI"}
 
     monkeypatch.setattr(discovery, "_play_listing", listing)
     app = await discovery.listed_app(PLAY, "in")
-    assert app == {"store": "play", "id": "com.sbi.lotusintouch", "publisher": "State Bank of India"}
+    assert app == {"store": "play", "id": "com.sbi.lotusintouch", "publisher": "State Bank of India",
+                   "developer_id": "State+Bank+of+India"}
 
 
 async def test_listed_app_reads_bundle_and_seller_from_an_app_store_link(monkeypatch):
     async def lookup(aid, cc):
-        return {"trackId": aid, "bundleId": "com.sbi.YONOBD", "artistName": "State Bank of India"}
+        return {"trackId": aid, "bundleId": "com.sbi.YONOBD", "artistName": "State Bank of India",
+                "artistId": 503784436}
 
     monkeypatch.setattr(discovery, "_itunes_app", lookup)
     app = await discovery.listed_app("https://apps.apple.com/in/app/yono-sbi-bangladesh/id1556426905", "in")
-    assert app == {"store": "app_store", "id": "com.sbi.YONOBD", "publisher": "State Bank of India"}
+    assert app == {"store": "app_store", "id": "com.sbi.YONOBD", "publisher": "State Bank of India",
+                   "developer_id": "503784436"}
 
 
-async def test_unreadable_listing_is_a_discovery_error(monkeypatch):
+async def test_unreadable_listed_app_is_a_discovery_error(monkeypatch):
     async def missing(pkg, cc):
         return None
 

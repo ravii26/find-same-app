@@ -30,6 +30,9 @@ from app.api.models import (
 from app.utils.http_client import is_blocked_message
 from app.config.settings import get_settings
 from app.services.allowlist import (
+    APP_STORE_DOMAIN,
+    PLAY_DOMAIN,
+    _norm_publisher,
     audit_item,
     drop_official,
     official_publishers,
@@ -151,7 +154,7 @@ def _official_listing_warnings(request: ScanRequest, hits: list[Hit], statuses: 
         ("ios_bundle", request.ios_bundle, {"apps.apple.com"}, "the App Store", "itunes"),
     )
     out = []
-    for field, value, domains, store, source in checks:
+    for name, value, domains, store, source in checks:
         if not value:
             continue
         if any(h.host and h.host.domain in domains and (h.package_id or "").lower() == value.lower() for h in hits):
@@ -162,10 +165,60 @@ def _official_listing_warnings(request: ScanRequest, hits: list[Hit], statuses: 
         else:
             why = "it was looked up directly and is not listed"
         out.append(
-            f"{field} '{value}' was not found on {store} ({why}). Official-app checks (icon and "
+            f"{name} '{value}' was not found on {store} ({why}). Official-app checks (icon and "
             f"permission comparison) are skipped, so the brand's own apps may be reported as rogue; "
             f"check the value and list the brand's other apps in allowlist_packages / official_publishers."
         )
+    return out
+
+
+def _learn_app_store_sellers(request: ScanRequest, hits: list[Hit]) -> ScanRequest:
+    """Add the seller id (artistId) of the brand's own App Store listings to app_store_seller_ids.
+
+    A bundle id is unique on the App Store, so the account that publishes a declared bundle there is the brand's.
+    """
+    sellers = list(request.app_store_seller_ids)
+    for h in hits:
+        if h.is_official_match and h.developer_id and h.host and h.host.domain == APP_STORE_DOMAIN:
+            if h.developer_id not in sellers:
+                sellers.append(h.developer_id)
+    return request.model_copy(update={"app_store_seller_ids": sellers})
+
+
+async def _stamp_play_developers(scan_id: str, request: ScanRequest, hits: list[Hit]) -> list[Hit]:
+    """Set developer_id on the Google Play hits that show one of the brand's publisher names.
+
+    Play search results carry the developer's name but not its id, and a name can be copied. Each such hit's
+    listing is read for the id, so the allowlist can tell the brand's own account from a copy that uses its name.
+    Hits with another publisher name are not looked up: an account shows one name on all its apps.
+    """
+    if not request.play_developer_ids:
+        return hits
+    publishers = official_publishers(request)
+    todo = [
+        i for i, h in enumerate(hits)
+        if h.host and h.host.domain == PLAY_DOMAIN and h.package_id and not h.developer_id
+        and _norm_publisher(h.publisher) in publishers
+    ]
+    if not todo:
+        return hits
+    from app.services.play_listing import fetch_account
+
+    countries = get_settings().default_country_list()
+    sem = asyncio.Semaphore(3)
+
+    async def _one(pkg: str) -> str | None:
+        async with sem:
+            return (await fetch_account(pkg, countries))[1]
+
+    ids = await asyncio.gather(*[_one(hits[i].package_id) for i in todo], return_exceptions=True)
+    out = list(hits)
+    for i, dev_id in zip(todo, ids):
+        if isinstance(dev_id, BaseException):
+            _note(scan_id, "WARN", f"Play developer lookup for {hits[i].package_id} failed: {dev_id}")
+        elif dev_id:
+            out[i] = hits[i].model_copy(update={"developer_id": dev_id})
+    _note(scan_id, "INFO", f"read the Play developer id of {len(todo)} hit(s) that show a brand publisher name")
     return out
 
 
@@ -191,17 +244,21 @@ async def _pipeline(scan_id: str, request: ScanRequest, redis_client: aioredis.R
         except Exception as exc:
             warn(f"Official permission fetch failed: {exc}")
     # The official developer is whoever publishes the caller's own android_package on Google Play. Learning it
-    # here means sister apps by the same company are recognised without the caller listing official_publishers.
+    # here means sister apps by the same company are recognised without the caller listing official_publishers,
+    # and the developer account id allowlists every Play app that account publishes.
     if request.android_package:
         try:
-            from app.services.play_listing import fetch_developer
-            developer = await fetch_developer(request.android_package)
+            from app.services.play_listing import fetch_account
+            developer, developer_id = await fetch_account(request.android_package, settings.default_country_list())
         except Exception as exc:
-            developer = None
+            developer = developer_id = None
             _note(scan_id, "WARN", f"official developer lookup failed: {exc}")
         if developer and developer.casefold() not in {p.casefold() for p in request.official_publishers}:
             request = request.model_copy(update={"official_publishers": [*request.official_publishers, developer]})
             _note(scan_id, "INFO", f"official publisher '{developer}' read from the Google Play listing of {request.android_package}")
+        if developer_id and developer_id not in request.play_developer_ids:
+            request = request.model_copy(update={"play_developer_ids": [*request.play_developer_ids, developer_id]})
+            _note(scan_id, "INFO", f"official Play developer id '{developer_id}' read from the listing of {request.android_package}")
 
     ctx = ScanContext(
         scan_id=scan_id,
@@ -277,6 +334,10 @@ async def _pipeline(scan_id: str, request: ScanRequest, redis_client: aioredis.R
     await status_store.set_progress(redis_client, scan_id, 80)
 
     deduped = deduplicate(all_hits)
+    st.hits = deduped
+
+    request = _learn_app_store_sellers(request, deduped)
+    deduped = await _stamp_play_developers(scan_id, request, deduped)
     st.hits = deduped
 
     # Allowlist: drop the brand's own apps/domains/publishers before scoring.

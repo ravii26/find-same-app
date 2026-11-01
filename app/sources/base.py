@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -141,9 +142,19 @@ class SourceAdapter(ABC):
 
     async def _run(self, ctx: ScanContext) -> tuple[list[Hit], SourceStatus]:
         """Wrapper that times execution, caps results, and catches all exceptions."""
+        from app.config.settings import get_settings
+
         start = time.monotonic()
+        limit = get_settings().source_timeout_seconds
         try:
-            hits, status = await self.search(ctx)
+            try:
+                hits, status = await asyncio.wait_for(self.search(ctx), limit)
+            except TimeoutError:
+                log.warning("%s: stopped after %ss", self.name, limit)
+                return [], SourceStatus(
+                    name=self.name, method=self.method, status="failed", results=0,
+                    error=f"timed out after {limit}s", duration_ms=int((time.monotonic() - start) * 1000),
+                )
             # Enforce the result cap centrally, per distinct query — keep the
             # first N hits of each query (identified by found_via[0].query).
             raw = len(hits)

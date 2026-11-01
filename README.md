@@ -453,7 +453,7 @@ Package `com.YONODEMobileApp`, publisher `State Bank of India`, host `app_store`
 4. **Official store.** It is on an official store but is not the official listing, so `official_store_name_clone` (+15) applies.
 5. **Result.** Score 76, high risk.
 
-This is a false positive for the customer's purposes. It is one of the brand's own apps, but the customer has not confirmed it, so it is not allowlisted. See [section 11](#11-known-limitations) for the cause and the open decision.
+This was a false positive. It is one of the brand's own apps, but the customer had not confirmed it, so it was not allowlisted. With the store-account rule ([section 6](#6-allowlist)) it is allowlisted when the brand has an App Store link (or an `ios_bundles` entry) whose seller is State Bank of India. In a live run on 2026-11-01 (both SBI links, alias `YONO`), it and 45 other State Bank of India apps on the two stores were allowlisted this way.
 
 ---
 
@@ -461,7 +461,24 @@ This is a false positive for the customer's purposes. It is one of the brand's o
 
 ### The rule
 
-A hit is allowlisted only when **both** are true:
+**Store account.** A hit on Google Play or the App Store is allowlisted when the store says one of the brand's accounts publishes it:
+
+- Google Play: the listing's developer id is in `play_developer_ids`.
+- App Store: the listing's seller id (`artistId`) is in `app_store_seller_ids`.
+
+The store issues these ids, and only the account owner can publish under one. So every app the brand's account publishes is cleared, including sibling apps the customer never confirmed and apps published after discovery. A copy that uses the same publisher *name* under another account is not cleared. The ids come only from Google Play and the App Store, never from a third-party site.
+
+Where the account ids come from:
+
+| Id | Source |
+|---|---|
+| `play_developer_ids` | The Play listing behind each of the brand's Play links (read at scan time), and the listing of `android_packages[0]` |
+| `app_store_seller_ids` | The App Store listing behind each of the brand's App Store links, and any App Store hit whose bundle id is one of `ios_bundles` |
+| Both | Can also be sent in the scan request |
+
+Play search results show the developer name but not the id. Each Play hit that shows a brand publisher name is looked up on its listing to read the id (3 at a time, across the configured storefronts). Play hits under other publisher names are not looked up, because an account shows one name on all its apps.
+
+Any other app hit is allowlisted only when **both** are true:
 
 1. **Publisher.** The hit's publisher matches a confirmed publisher. Matching ignores case, punctuation and company suffixes (`Pvt`, `Ltd`, `Inc`).
 2. **Package.** The hit's package id is one of the brand's confirmed ids on the **same platform**, or is in `allowlist_packages`.
@@ -597,6 +614,8 @@ Every field of the submitted request body is kept (defaults included), and the s
 | `official_domain` | string or null | Request |
 | `official_domains` | array of string | Request |
 | `official_publishers` | array of string | Request |
+| `play_developer_ids` | array of string | Request |
+| `app_store_seller_ids` | array of string | Request |
 | `allowlist_packages` | array of string | Request |
 | `keywords` | array of string | Request |
 | `analyze_apks` | boolean | Settings (not a request field) |
@@ -630,6 +649,7 @@ Fields that are not sent show their defaults. A brand scan sends only `brand_id`
 | `package_id` | string or null | Package or bundle id |
 | `version` | string or null | Version when the source gives one |
 | `publisher` | string or null | Developer or publisher name |
+| `developer_id` | string or null | Store account id of the publisher (Play developer id, App Store `artistId`). Only set for Google Play and App Store hits. |
 | `icon_url` | string or null | Icon |
 | `snippet` | string or null | Search snippet |
 | `apk_url` | string or null | APK link, when the page offers one (not downloaded) |
@@ -732,13 +752,13 @@ Do not wrap `run.py restart` in `timeout`. The timeout kills the processes it st
 
 **Open issues in the latest run**
 
-- **Own-brand packages not yet confirmed score high.** After the scoring change that compares a hit with every confirmed Android id, unconfirmed packages that are close to a confirmed package score much higher. In the latest SBI scan, `com.YONODEMobileApp` (YONO SBI Europe) scores 76 and is a high-risk result, although it is one of the brand's own apps. It is not allowlisted until the customer confirms it. The package similarity term does not tell a sibling app from a copy. The fix needs a decision. See the open item below.
+- **Own-brand apps outside Google Play and the App Store still need confirmation.** Sibling apps on Google Play and the App Store are now cleared by the brand's store account (see [section 6](#6-allowlist)). On other stores (GetApps, Samsung, Huawei, APK sites) there is no trusted account id, so a sibling there is cleared only by publisher plus a confirmed package id. The latest SBI results in [section 12](#12-latest-sbi-results) were produced before this change. Apps published by a different account of the same group (for example SBI Payments) are not covered and still need their own link.
 - **Alias-driven false positives.** The alias "YONO" also matches unrelated apps with the word "Yono" in their name, for example "Chuzu Yono Gobang" (44) and "YoNo: Party Game" (41). Aliases must be real names for the brand.
 - **Scores have no per-signal breakdown.** The report lists reasons, not the points each signal added. The walkthroughs in section 5 use the configured values and the reasons, not measured points.
 
 **Discovery**
 
-- **The Play developer page lists about 20 apps.** The page returns its first 20 packages and loads more with a cursor, which discovery does not follow. In the SBI run, `com.YONOZAMobileApp` (YONO SBI South Africa) and other apps were missing from the developer list. Name search finds some of them, but the search returns only 12 to 15 results per storefront.
+- **The Play developer page can list only about 20 apps.** Discovery scrolls the page in a browser to load the rest. Without the browser (Playwright missing or failing) it reads the static page, which holds the first 20 packages, and says so in `notes`. In an earlier SBI run, `com.YONOZAMobileApp` (YONO SBI South Africa) and other apps were missing from the developer list. Name search finds some of them, but the search returns only 12 to 15 results per storefront.
 - **Without an App Store link, App Store sellers are matched by name.** A seller whose name equals the Play developer name is a candidate. The customer must check it.
 - **No manual add.** A candidate that discovery does not find cannot be added. Confirmation accepts only candidates.
 - **Discovery is one-time.** Candidates are not refreshed after confirmation. A new app of the brand needs a new discovery run.
@@ -760,12 +780,6 @@ Do not wrap `run.py restart` in `timeout`. The timeout kills the processes it st
 
 - **Results are only as good as the confirmed list.** An unconfirmed own app is reported as a finding. A confirmed app is never reported.
 - **English and the listed localized phrases only.** Other languages depend on the packs in `config/phrases.yaml`.
-
-**Open decision for the customer owner**
-
-Own-brand packages that are not confirmed (see the first item above) need one of these:
-1. Keep the current behaviour: they are findings until the customer confirms them.
-2. Score a hit that matches a confirmed or discovered sibling id as "brand family": lower score, labelled as "not confirmed". This needs a rule for which ids count as family.
 
 ---
 

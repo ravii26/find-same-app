@@ -61,6 +61,10 @@ class ScanRequest(BaseModel):
     allowlist_packages: list[str] = Field(default_factory=list)   # other legit app IDs, e.g. a business app
     official_publishers: list[str] = Field(default_factory=list)  # developer names on official stores
     official_domains: list[str] = Field(default_factory=list)     # other official registrable domains
+    # The brand's store accounts: Google Play developer ids and App Store seller ids (artistId). The store owns
+    # these ids, so every app an account publishes on that store is the brand's own (see services/allowlist.py).
+    play_developer_ids: list[str] = Field(default_factory=list)
+    app_store_seller_ids: list[str] = Field(default_factory=list)
     keywords: list[str] = Field(default_factory=list)
 
     # The body as the client sent it, before a confirmed brand was merged in. Set by the API and reported as the
@@ -107,7 +111,7 @@ class ScanRequest(BaseModel):
 
         data = self.model_dump(mode="json")
         for key in ("keywords", "allowlist_packages", "official_publishers", "official_domains",
-                    "android_packages", "ios_bundles", "brand_aliases"):
+                    "android_packages", "ios_bundles", "brand_aliases", "play_developer_ids", "app_store_seller_ids"):
             data[key] = sorted({str(v).strip().lower() for v in data[key]})
         for key in ("brand_name", "official_domain"):
             if data[key]:
@@ -116,7 +120,7 @@ class ScanRequest(BaseModel):
         return hashlib.sha256(blob.encode()).hexdigest()
 
     @field_validator("allowlist_packages", "official_publishers", "official_domains", "android_packages", "ios_bundles",
-                     "brand_aliases")
+                     "brand_aliases", "play_developer_ids", "app_store_seller_ids")
     @classmethod
     def clean_allowlist(cls, v: list[str]) -> list[str]:
         if len(v) > 200:
@@ -178,6 +182,9 @@ class Hit(BaseModel):
     package_id: str | None = None
     version: str | None = None
     publisher: str | None = None
+    # The store's id of the publishing account (Google Play developer id, App Store artistId). Set only from
+    # Google Play and the App Store themselves, never from a third-party site.
+    developer_id: str | None = None
     icon_url: str | None = None
     snippet: str | None = None
     apk_url: str | None = None

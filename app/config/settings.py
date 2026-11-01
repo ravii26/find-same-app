@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     max_response_bytes: int = 10 * 1024 * 1024  # 10 MB
     max_apk_bytes: int = 100 * 1024 * 1024  # 100 MB
     scan_timeout_seconds: int = 600
+    # One source that hangs (a download that trickles in, so no read ever times out) must not use up the scan's
+    # time: it is stopped and reported as failed. Below scan_timeout_seconds, so scoring still has time to run.
+    source_timeout_seconds: int = 240
 
     # HTTP Client
     http_connect_timeout: float = 10.0

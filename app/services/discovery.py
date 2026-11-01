@@ -306,7 +306,8 @@ async def discover(
 
 
 async def listed_app(url: str, cc: str) -> dict[str, str]:
-    """The store, id and publisher of the app behind one link, as the store shows them.
+    """The store, id, publisher and publishing account (developer_id) of the app behind one link, as the store
+    shows them. developer_id is the Play developer id or the App Store artistId, "" when the store gives none.
 
     Raises DiscoveryError when the link is not a listing or the store cannot be read.
     """
@@ -315,11 +316,13 @@ async def listed_app(url: str, cc: str) -> dict[str, str]:
         listing = await _play_listing(pkg, cc.lower())
         if not listing:
             raise DiscoveryError(f"Google Play listing for {pkg} could not be read")
-        return {"store": "play", "id": pkg, "publisher": listing.get("developer") or ""}
+        return {"store": "play", "id": pkg, "publisher": listing.get("developer") or "",
+                "developer_id": str(listing.get("developerId") or "")}
     aid = app_store_id_from_url(url)
     if not aid:
         raise DiscoveryError(f"{url} is not a store link with an id")
     seed = await _itunes_app(aid, cc.lower())
     if not seed or not seed.get("bundleId"):
         raise DiscoveryError(f"App Store listing {aid} could not be read")
-    return {"store": "app_store", "id": seed["bundleId"], "publisher": seed.get("artistName") or ""}
+    return {"store": "app_store", "id": seed["bundleId"], "publisher": seed.get("artistName") or "",
+            "developer_id": str(seed.get("artistId") or "")}

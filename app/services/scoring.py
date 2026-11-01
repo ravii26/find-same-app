@@ -132,12 +132,14 @@ def _score_one(
 
     # Package ID similarity against every official Android id, so each package of a multi-app brand counts
     official_pkgs = brand_packages or ((android_package,) if android_package else ())
+    # Package ids are compared without case: mirrors often list them lower-cased
+    is_official_pkg = (hit_package_id or "").lower() in {p.lower() for p in official_pkgs}
     if hit_package_id and official_pkgs:
         pkg_sim = max(_fuzzy(hit_package_id, p) for p in official_pkgs)
         score += pkg_sim * weights["package_similarity"] * 100
         if pkg_sim > 0.85:
             reasons.append(f"package ID '{hit_package_id}' closely matches official package")
-        if hit_package_id not in official_pkgs and pkg_sim > 0.7:
+        if not is_official_pkg and pkg_sim > 0.7:
             score += signals["package_id_suffix_variation"]
             reasons.append("package ID has suffix variation of official ID")
 
@@ -217,7 +219,7 @@ def _score_one(
     # Companion/utility app for the brand: not an impersonation attempt
     if (
         match == "exact" and not is_official_match
-        and hit_package_id not in official_pkgs
+        and not is_official_pkg
         and is_companion_app(name, brand_name)
     ):
         score -= signals.get("companion_app_penalty", 15)

@@ -193,14 +193,18 @@ def merge_into_request(body: ScanRequest, doc: dict[str, Any], own_apps: list[di
 
     own_apps are the apps behind the brand's store links, read from their stores by the caller (discovery.listed_app).
     Apps kept on the brand record by earlier scans are added as well. Each app adds its id on its platform and its
-    publisher. The brand's name, aliases and official domains are added too, and the brand name is taken from the
-    stored brand when the request has none.
+    publisher. The store accounts of the own_apps (their developer_id) are added too, so every app those accounts
+    publish is allowlisted. The brand's name, aliases and official domains are added too, and the brand name is
+    taken from the stored brand when the request has none.
     """
     apps = [*own_apps, *doc.get("allowlisted_apps", [])]
     domains = doc.get("official_domains", [])
     play = [a["id"] for a in apps if a["store"] == "play"]
     ios = [a["id"] for a in apps if a["store"] == "app_store"]
     publishers = [a["publisher"] for a in apps if a.get("publisher")]
+    # Only from own_apps: those were just read from the store behind the customer's own links
+    play_devs = [a["developer_id"] for a in own_apps if a["store"] == "play" and a.get("developer_id")]
+    sellers = [a["developer_id"] for a in own_apps if a["store"] == "app_store" and a.get("developer_id")]
     return body.model_copy(update={
         "brand_id": doc["brand_id"],
         "brand_name": body.brand_name or doc["brand_name"],
@@ -208,6 +212,8 @@ def merge_into_request(body: ScanRequest, doc: dict[str, Any], own_apps: list[di
         "android_packages": list(dict.fromkeys([*body.android_packages, *play])),
         "ios_bundles": list(dict.fromkeys([*body.ios_bundles, *ios])),
         "official_publishers": list(dict.fromkeys([*body.official_publishers, *publishers])),
+        "play_developer_ids": list(dict.fromkeys([*body.play_developer_ids, *play_devs])),
+        "app_store_seller_ids": list(dict.fromkeys([*body.app_store_seller_ids, *sellers])),
         "official_domains": list(dict.fromkeys([*body.official_domains, *domains])),
         "official_domain": body.official_domain or (domains[0] if domains else None),
     })

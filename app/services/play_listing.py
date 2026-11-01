@@ -81,22 +81,33 @@ def _fetch_permissions_sync(package_id: str) -> list[str]:
         return []
 
 
-def _fetch_developer_sync(package_id: str, country: str = "us") -> str | None:
-    """Blocking. The developer name on the package's Google Play listing."""
+def _fetch_account_sync(package_id: str, country: str = "us") -> tuple[str | None, str | None]:
+    """Blocking. (developer name, developer id) on the package's Google Play listing; None for what it lacks."""
     try:
         from google_play_scraper import app as gps_app
-        info = call_with_backoff(partial(gps_app, package_id, lang="en", country=country))
-        name = (info or {}).get("developer")
-        return (name.strip() or None) if isinstance(name, str) else None
+        info = call_with_backoff(partial(gps_app, package_id, lang="en", country=country)) or {}
     except Exception as exc:
         # Not on Play (or Play unreachable): the caller falls back to whatever publishers it was given
         log.info("developer lookup failed for %r: %s: %s", package_id, type(exc).__name__, exc)
-        return None
+        return None, None
+    name, dev_id = info.get("developer"), info.get("developerId")
+    return (
+        (name.strip() or None) if isinstance(name, str) else None,
+        (str(dev_id).strip() or None) if dev_id else None,
+    )
 
 
 async def fetch_permissions(package_id: str) -> list[str]:
     return await asyncio.to_thread(_fetch_permissions_sync, package_id)
 
 
-async def fetch_developer(package_id: str) -> str | None:
-    return await asyncio.to_thread(_fetch_developer_sync, package_id)
+async def fetch_account(package_id: str, countries: list[str] | None = None) -> tuple[str | None, str | None]:
+    """(developer name, developer id) of the package's Google Play listing.
+
+    An app can be missing from some storefronts, so each country is tried in turn until the listing is read.
+    """
+    for country in countries or ["us"]:
+        name, dev_id = await asyncio.to_thread(_fetch_account_sync, package_id, country.lower())
+        if name or dev_id:
+            return name, dev_id
+    return None, None

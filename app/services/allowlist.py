@@ -1,7 +1,15 @@
 # app/services/allowlist.py
 """Allowlist: keep the brand's own apps, domains and publishers out of the rogue results.
 
-Nothing is guessed. An app is allowlisted only when BOTH of these match what the caller declared:
+Nothing is guessed. An app on Google Play or the App Store is allowlisted when the store says one of the brand's
+accounts publishes it:
+
+  account    the hit's developer_id (Play developer id, App Store artistId) is in `play_developer_ids` or
+             `app_store_seller_ids` for that store. The store issues these ids and only the account owner can
+             publish under one, so this covers the brand's sibling apps without listing each package. The id is
+             read from the store itself, so it never comes from a third-party site.
+
+Any other app is allowlisted only when BOTH of these match what the caller declared:
 
   publisher  the hit's publisher equals an `official_publishers` entry (case, punctuation and corporate
              suffixes ignored).
@@ -68,6 +76,18 @@ def _domains(request: ScanRequest) -> set[str]:
     }
 
 
+PLAY_DOMAIN = "play.google.com"
+APP_STORE_DOMAIN = "apps.apple.com"
+
+
+def official_accounts(request: ScanRequest) -> dict[str, set[str]]:
+    """The brand's store account ids, keyed by the store's domain."""
+    return {
+        PLAY_DOMAIN: set(request.play_developer_ids),
+        APP_STORE_DOMAIN: set(request.app_store_seller_ids),
+    }
+
+
 def official_publishers(request: ScanRequest) -> set[str]:
     """Normalised publisher names the caller declared (`official_publishers`)."""
     pubs = {_norm_publisher(p) for p in request.official_publishers}
@@ -77,13 +97,20 @@ def official_publishers(request: ScanRequest) -> set[str]:
 
 def allowlist_reason(
     hit: Hit, declared: set[str], official_ids: dict[str, set[str]], domains: set[str], publishers: set[str],
+    accounts: dict[str, set[str]] | None = None,
 ) -> str | None:
     """Why this hit is allowlisted, or None.
 
-    An app (a hit with a package id) is allowlisted only when its publisher and its package id both match
+    An app on Google Play or the App Store is allowlisted when one of the brand's accounts publishes it there.
+    Any other app (a hit with a package id) is allowlisted only when its publisher and its package id both match
     what the caller declared. The store it was found on, its URL and its domain do not count.
     Other hits (web pages) keep the domain rule.
     """
+    domain = getattr(hit.host, "domain", None) if hit.host else None
+    developer_id = getattr(hit, "developer_id", None)
+    if developer_id and domain and developer_id in (accounts or {}).get(domain, set()):
+        return f"published by the brand's {hit.host.name} account {developer_id}"
+
     pkg = (hit.package_id or "").strip().lower()
     if pkg:
         own = official_ids.get(_platform(hit), set())
@@ -107,7 +134,7 @@ def split_allowlisted(
     caller drops them after scoring with `drop_official`.
     """
     declared, official_ids = _declared_packages(request), _official_ids(request)
-    domains, publishers = _domains(request), official_publishers(request)
+    domains, publishers, accounts = _domains(request), official_publishers(request), official_accounts(request)
 
     remaining: list[Hit] = []
     allowed: list[AllowlistedItem] = []
@@ -115,7 +142,7 @@ def split_allowlisted(
         if keep_official and h.is_official_match:
             remaining.append(h)
             continue
-        reason = allowlist_reason(h, declared, official_ids, domains, publishers)
+        reason = allowlist_reason(h, declared, official_ids, domains, publishers, accounts)
         if reason:
             allowed.append(_item(h, reason))
         else:

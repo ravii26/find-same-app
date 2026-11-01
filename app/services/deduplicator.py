@@ -54,6 +54,7 @@ def deduplicate(hits: list[Hit]) -> list[Hit]:
                 "apk_url": existing.apk_url or hit.apk_url,
                 # Keep fields the first listing lacked
                 "publisher": existing.publisher or hit.publisher,
+                "developer_id": existing.developer_id or hit.developer_id,
                 "icon_url": existing.icon_url or hit.icon_url,
             })
         else:
@@ -72,11 +73,13 @@ def group_mirrors(hits: list[Hit]) -> tuple[list[Hit], list[AllowlistedItem]]:
     The same package on Aptoide, Uptodown and APKPure is one finding, not three. The kept hit says where
     else it is listed and the others are audited, so nothing is lost silently.
     """
-    groups: dict[str, list[Hit]] = {}
+    groups: dict[tuple[str, str], list[Hit]] = {}
     for hit in hits:
         pkg = (hit.package_id or "").strip().lower()
         if pkg and hit.type.value == "app_listing":
-            groups.setdefault(pkg, []).append(hit)
+            # An App Store bundle id and an Android package id that read the same are two different apps
+            platform = "ios" if hit.host and hit.host.domain == "apps.apple.com" else "android"
+            groups.setdefault((platform, pkg), []).append(hit)
 
     merged_ids: set[str] = set()
     replacements: dict[str, Hit] = {}
