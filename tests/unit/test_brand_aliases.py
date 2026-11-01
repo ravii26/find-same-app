@@ -17,7 +17,7 @@ def _score(name: str, publisher: str | None = "Yono Games", aliases: tuple[str, 
         name, name, None, publisher,
         "https://www.apkpure.com/x", "apk_site",
         "YONO SBI", None, None,
-        False, False, False, None,
+        False, False, None,
         aliases,
     )
 

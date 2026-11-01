@@ -285,7 +285,7 @@ Brand logos are not an input yet. Icon comparison is in the scoring code, but th
 
 Each hit starts at 0. Signals add or subtract points. The score is capped in a few cases. The final value is rounded and clamped to 0 to 100.
 
-Scoring is deterministic. Weights and signal values are in `config/scoring.yaml`. `ruleset_version` is `v10`, and the report carries it as `summary.scoring_ruleset`. Change the ruleset version when weights or signals change.
+Scoring is deterministic. Weights and signal values are in `config/scoring.yaml`. `ruleset_version` is `v11`, and the report carries it as `summary.scoring_ruleset`. Change the ruleset version when weights or signals change.
 
 ### Weights
 
@@ -305,10 +305,9 @@ A weight multiplies a similarity between 0 and 1, then by 100. For example, a pa
 |---|---|---|
 | `scam_lure_keyword` | +6 | Brand matched exactly or fuzzily, and a scam word appears (`reward`, `kyc`, `login`, `bonus`, `loan`, `card`, `secure`, `account`, ...) |
 | `brand_on_free_hosting` | +10 | Brand name in the subdomain of a free host (`web.app`, `herokuapp.com`, `pages.dev`, `github.io`, ...) |
-| `lure_keyword_in_title` | +5 | Title contains `mod`, `cracked`, `premium`, `free`, `hack`, `cheat`, `unlocked`, `pro` or `lite` |
+| `lure_keyword_in_title` | +5 | Title contains `mod`, `cracked`, `premium`, `free`, `hack`, `cheat` or `unlocked` |
 | `cert_mismatch_with_similar_pkg` | +15 | APK signing certificate differs from the official app's, and the package is a variant or the APK mentions the brand. Only used when APK analysis is on. |
 | `package_id_suffix_variation` | +5 | Package id is similar to an official id but not equal to it |
-| `official_store_name_clone` | +15 | Near-exact brand name on an official store, but not the official listing |
 | `domain_jw_lookalike` | up to +12 | Lookalike registrable domain (Jaro-Winkler, scaled 0.85 to 1.0) |
 | `domain_has_brand_plus_keyword` | +6 | Domain is the brand plus a keyword (`petpooja-apk.com`) |
 | `tld_swap` | +4 | Same name, different TLD |
@@ -369,8 +368,8 @@ Package `com.YONODEMobileApp`, publisher `State Bank of India`, host `app_store`
 1. **Presence.** Exact match on the brand name, so no cap.
 2. **Name similarity.** "YONO SBI Europe" is close to "YONO SBI", so the name term adds points. The report says "resembles brand name".
 3. **Package similarity.** The package is compared with every Android id of the brand. It is close to `com.YONOUKMobileApp` and the other `com.YONO*MobileApp` ids, so the package term is large, and the suffix-variation signal (+5) applies. The report says "closely matches official package" and "suffix variation".
-4. **Official store.** It is on an official store but is not the official listing, so `official_store_name_clone` (+15) applies.
-5. **Result.** Score 76, high risk.
+4. **Official store.** Being on an official store adds nothing by itself. The official-store clone bonus was removed, because a common name there is not evidence of impersonation.
+5. **Result.** Score 61 (it was 76 with the clone bonus). Below the high-risk line of 70.
 
 This was a false positive. It is one of the brand's own apps, but the customer had not confirmed it, so it was not allowlisted. With the store-account rule ([section 6](#6-allowlist)) it is allowlisted when the brand has an App Store link (or an `ios_bundles` entry) whose seller is State Bank of India. In a live run on 2026-11-01 (both SBI links, alias `YONO`), it and 45 other State Bank of India apps on the two stores were allowlisted this way.
 
@@ -540,7 +539,7 @@ in `query`.
 | `allowlisted_count` | integer | Length of `allowlisted` |
 | `suppressed_count` | integer | Length of `suppressed` |
 | `duration_ms` | integer | Scan time |
-| `scoring_ruleset` | string | Ruleset version (`v10`) |
+| `scoring_ruleset` | string | Ruleset version (`v11`) |
 
 ### `results[]` (Hit)
 
@@ -737,7 +736,7 @@ The labels are a judgement made from the names and packages. They are not checke
 .venv312/bin/python -m pytest tests/unit -q -p no:cacheprovider --ignore tests/unit/test_csv_injection.py --ignore tests/unit/test_url_tools.py
 ```
 
-Latest run: 296 passed, 23 failed. The 23 failures are in older test files that call functions and attributes no longer in the code (`ScanReport.sources`, `_get_redis`, `default_country_list`, `progress_cb`, `depth`, older rate-limiter and adapter internals). Two test files were excluded because they import functions that no longer exist: `test_csv_injection.py` and `test_url_tools.py`.
+Latest run: 324 passed, 23 failed. The 23 failures are in older test files that call functions and attributes no longer in the code (`ScanReport.sources`, `_get_redis`, `default_country_list`, `progress_cb`, `depth`, older rate-limiter and adapter internals). Two test files were excluded because they import functions that no longer exist: `test_csv_injection.py` and `test_url_tools.py`.
 
 `tests/integration/` calls `status_store` functions that no longer exist (`get_dedup`, `add_to_running`, `get_progress`). Those tests fail and are not part of the run above.
 

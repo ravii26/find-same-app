@@ -110,7 +110,6 @@ def _score_one(
     brand_name: str,
     android_package: str | None,
     official_domain: str | None,
-    is_official_store: bool = False,
     is_official_match: bool = False,
     publisher_is_official: bool = False,
     hit_snippet: str | None = None,
@@ -129,12 +128,6 @@ def _score_one(
     if name:
         sim = _fuzzy(name, brand_name)
         score += sim * weights["name_similarity"] * 100
-        # Near-exact name on an official store from a non-official listing is the
-        # classic impersonation pattern; name similarity alone caps below the
-        # relevance threshold, so it needs its own signal.
-        if is_official_store and not is_official_match and sim >= 0.9:
-            score += signals.get("official_store_name_clone", 15)
-            reasons.append("near-exact brand name on an official store, not the official listing")
         if sim > 0.9:
             reasons.append(f"app name '{name}' is very similar to brand name")
         elif sim > 0.7:
@@ -323,7 +316,6 @@ async def score_hit(hit: Hit, request: ScanRequest, official_publishers: set[str
         request.brand_name,
         request.android_package,
         request.official_domain,
-        bool(hit.host and hit.host.is_official_store),
         hit.is_official_match,
         publisher_is_official,
         hit.snippet,

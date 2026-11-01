@@ -1,7 +1,7 @@
 # config/scoring.yaml
 # Scoring ruleset — weights and thresholds for relevance scoring.
 # Increment ruleset_version whenever weights or signals change.
-ruleset_version: "v10"
+ruleset_version: "v11"
 
 weights:
   # Name / title similarity (rapidfuzz ratio on homoglyph-folded strings)
@@ -50,8 +50,6 @@ signals:
   # Jaccard >= 0.85 adds no points on its own (a shared permission list alone is not a copy)
   permission_similarity_medium: 8      # Jaccard >= 0.60 — significant overlap
   # excess_dangerous: min(10, count * 2) — computed inline, not a fixed signal
-  # Non-official listing with near-exact brand name on an official store
-  official_store_name_clone: 15
   # Brand-absent cap: hits with no brand token in name/package/publisher are capped here.
   # Must be one below min_relevance so capped hits are automatically excluded.
   no_brand_presence_cap: 34

@@ -36,7 +36,7 @@ log = logging.getLogger(__name__)
 class FDroidAdapter(SourceAdapter):
     name = "fdroid"
     method = SourceMethod.api
-    host_group = "official_store"
+    host_group = "app_store"
     max_results = 10  # curated open-source index — low rogue yield
 
     _INDEX_URL = "https://f-droid.org/repo/index-v2.json"

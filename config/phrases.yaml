@@ -29,7 +29,7 @@ default:
     - for pc
     - hack
     - cheats
-  lure_words: [mod, cracked, premium, free, hack, cheat, cheats, unlocked, pro, lite]
+  lure_words: [mod, cracked, premium, free, hack, cheat, cheats, unlocked]
   bait_words: [mod, cracked, hack, hacked, cheat, cheats, unlocked, coupon, coupons, promo code, voucher, vouchers]
   scam_words:
     - reward
