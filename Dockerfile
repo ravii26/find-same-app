@@ -32,7 +32,7 @@ RUN pip install --no-cache-dir -e "."
 # Playwright + Chromium for sources that require JS rendering (e.g. uptodown)
 RUN pip install --no-cache-dir playwright && playwright install --with-deps chromium
 COPY . .
-CMD ["dramatiq", "app.jobs.actors", "--processes", "1", "--threads", "4", "--queues", "scans", "webhooks", "discovery"]
+CMD ["dramatiq", "app.jobs.actors", "--processes", "1", "--threads", "4", "--queues", "scans"]
 
 # Note: Docker image was written but NOT built and run in this development session.
 # The compose file above defines the two-service setup with DATA_DIR on a mounted volume.

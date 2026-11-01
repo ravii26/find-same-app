@@ -8,49 +8,29 @@ This adapter uses async Playwright; the host needs `playwright install chromium`
 
 from __future__ import annotations
 
-import datetime
 import hashlib
 import logging
-import re
 from urllib.parse import quote_plus
 
 from app.api.models import (
-    FoundVia,
     Hit,
-    HitType,
-    HostInfo,
     ScanContext,
     SourceMethod,
     SourceStatus,
 )
-from app.sources.base import SourceAdapter, note_page_error, page_problem, scrape_status
-
+from app.sources.base import (
+    SourceAdapter,
+    embedded_package,
+    note_page_error,
+    page_problem,
+    scrape_status,
+    scraped_hit,
+)
+from app.utils.browser import browser_context
 from app.utils.http_client import throttle
 
 log = logging.getLogger(__name__)
 
-try:
-    from playwright.async_api import async_playwright as _async_playwright
-    _PLAYWRIGHT_OK = True
-except ImportError:
-    _async_playwright = None  # type: ignore[assignment]
-    _PLAYWRIGHT_OK = False
-
-_PKG_RE = re.compile(
-    r'\b((?:com|net|org|in|io|co)\.[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]+)+)\b'
-)
-_DOMAIN_TLDS = {".com", ".net", ".org", ".io", ".co", ".in"}
-_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-)
-
-def _pkg_from_text(text: str) -> str:
-    for m in _PKG_RE.finditer(text):
-        pkg = m.group(1)
-        if not any(pkg.endswith(t) for t in _DOMAIN_TLDS):
-            return pkg
-    return ""
 
 
 class UptodownAdapter(SourceAdapter):
@@ -59,14 +39,6 @@ class UptodownAdapter(SourceAdapter):
     host_group = "apk_site"
 
     async def search(self, ctx: ScanContext) -> tuple[list[Hit], SourceStatus]:
-        if not _PLAYWRIGHT_OK:
-            log.warning("uptodown: playwright not installed — adapter unavailable")
-            return [], SourceStatus(
-                name=self.name, method=self.method, status="failed",
-                error="playwright not installed — run: pip install playwright && playwright install chromium",
-            )
-
-        async_playwright = _async_playwright
 
         brand_tokens = {t.lower() for t in ctx.request.brand_name.split() if len(t) >= 3}
         terms = [
@@ -81,15 +53,7 @@ class UptodownAdapter(SourceAdapter):
         blocked: list[str] = []
 
         try:
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-                )
-                bctx = await browser.new_context(
-                    accept_downloads=False,
-                    user_agent=_UA, viewport={"width": 1280, "height": 800}, locale="en-US"
-                )
+            async with browser_context() as bctx:
 
                 for term in terms:
                     search_url = f"https://en.uptodown.com/android/search?query={quote_plus(term)}"
@@ -127,7 +91,7 @@ class UptodownAdapter(SourceAdapter):
                             if pkg_el:
                                 pkg = (await pkg_el.text_content() or "").strip()
                             if not pkg:
-                                pkg = _pkg_from_text(await app_page.content())
+                                pkg = embedded_package(await app_page.content())
                             if not pkg or pkg in seen_pkgs:
                                 continue
                             seen_pkgs.add(pkg)
@@ -148,24 +112,18 @@ class UptodownAdapter(SourceAdapter):
                                 icon_url = await icon_el.get_attribute("src") or None
 
                             uid = hashlib.sha256(app_url.encode()).hexdigest()[:32]
-                            hits.append(Hit(
-                                id=uid,
-                                type=HitType.app_listing,
+                            hits.append(scraped_hit(
+                                self,
+                                term,
+                                url=app_url,
+                                host_name="Uptodown",
+                                host_domain="uptodown.com",
+                                hit_id=uid,
                                 title=name or pkg,
                                 app_name=name or None,
                                 package_id=pkg,
                                 publisher=dev or None,
                                 icon_url=icon_url,
-                                url=app_url,
-                                host=HostInfo(
-                                    group=self.host_group,
-                                    name="Uptodown",
-                                    domain="uptodown.com",
-                                    is_official_store=False,
-                                ),
-                                found_via=[FoundVia(source=self.name, method=self.method, query=term)],
-                                relevance_score=0,
-                                discovered_at=datetime.datetime.now(datetime.timezone.utc),
                             ))
                         except Exception as e:
                             log.warning("uptodown: app page parse failed for %r: %s", app_url, e)
@@ -173,7 +131,6 @@ class UptodownAdapter(SourceAdapter):
                         finally:
                             await app_page.close()
 
-                await browser.close()
 
         except Exception as exc:
             log.warning("uptodown: scrape failed: %s", exc)

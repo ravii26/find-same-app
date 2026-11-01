@@ -24,17 +24,15 @@ from selectolax.lexbor import LexborHTMLParser as HTMLParser
 
 from app.api.models import (
     EvidenceRecord,
-    FoundVia,
     Hit,
     HitType,
-    HostInfo,
     ScanContext,
     SourceMethod,
     SourceStatus,
 )
 from app.services.keyword_expansion import _homoglyph_variants, _typo_variants
 from app.services.page_assessment import assess_page, extract_apk_links, find_download_pages
-from app.sources.base import SourceAdapter
+from app.sources.base import SourceAdapter, scraped_hit
 from app.utils.http_client import BlockedError, FetchError, decode_response, fetch
 from app.utils.ssrf_guard import SSRFError, check_url
 from app.utils.url_tools import registrable_domain
@@ -120,7 +118,7 @@ async def _resolves(domain: str, sem: asyncio.Semaphore) -> bool:
             await asyncio.wait_for(loop.run_in_executor(None, socket.getaddrinfo, domain, None), _DNS_TIMEOUT)
         except socket.gaierror:
             return False  # NXDOMAIN / no such host: the normal case for a permutation, not an error
-        except (asyncio.TimeoutError, OSError) as exc:
+        except (TimeoutError, OSError) as exc:
             log.info("lookalike: DNS lookup of %s failed: %s: %s", domain, type(exc).__name__, exc)
             return False
     try:
@@ -223,7 +221,7 @@ async def _probe(
         kind = assess_page(html, brand, official_domain)
         apk_url = await _find_apk(html, page_url) if kind in ("brand_bait", "mentions_brand") else None
         check = EvidenceRecord(
-            captured_at=datetime.datetime.now(datetime.timezone.utc),
+            captured_at=datetime.datetime.now(datetime.UTC),
             http_status=resp.status_code,
             final_url=page_url,
             page_sha256=hashlib.sha256(resp.content).hexdigest(),
@@ -234,7 +232,7 @@ async def _probe(
         reason = _unreachable_reason(exc)
         log.info("lookalike: probe of %s: %s", domain, reason)
         return None, None, None, EvidenceRecord(
-            captured_at=datetime.datetime.now(datetime.timezone.utc), error=f"unreachable: {reason}",
+            captured_at=datetime.datetime.now(datetime.UTC), error=f"unreachable: {reason}",
         )
 
 
@@ -279,7 +277,7 @@ class LookalikeDomainAdapter(SourceAdapter):
             for d in [official, *ctx.request.official_domains] if d
         }
 
-        now = datetime.datetime.now(datetime.timezone.utc)
+        now = datetime.datetime.now(datetime.UTC)
         hits: list[Hit] = []
         for domain in live:
             title, final_domain, apk_url, check = probe_by_domain.get(domain, (None, None, None, None))
@@ -291,17 +289,17 @@ class LookalikeDomainAdapter(SourceAdapter):
             if not apk_url:
                 continue
             url = f"https://{domain}/"
-            hits.append(Hit(
-                id=hashlib.sha256(url.encode()).hexdigest()[:32],
-                type=HitType.web_page,
+            hits.append(scraped_hit(
+                self,
+                official,
+                url=url,
+                host_name="Lookalike domain",
+                host_domain=domain,
+                hit_type=HitType.web_page,
                 app_name=domain.split(".", 1)[0],
                 title=title or f"Lookalike domain {domain} (resolves in DNS)",
-                url=url,
                 apk_url=apk_url,
                 evidence=check,
-                host=HostInfo(group=self.host_group, name="Lookalike domain", domain=domain),
-                found_via=[FoundVia(source=self.name, method=self.method, query=official)],
-                relevance_score=0,
                 discovered_at=now,
             ))
 

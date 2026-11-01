@@ -3,13 +3,17 @@
 
 from __future__ import annotations
 
+import asyncio
+import datetime
+import hashlib
 import logging
 import re
 import time
 from abc import ABC, abstractmethod
 from typing import Literal
 
-from app.api.models import Hit, ScanContext, SourceMethod, SourceStatus
+from app.api.models import FoundVia, Hit, HitType, HostInfo, ScanContext, SourceMethod, SourceStatus
+from app.services.keyword_expansion import fold_homoglyphs
 
 log = logging.getLogger(__name__)
 
@@ -115,6 +119,42 @@ def scrape_status(
     )
 
 
+# A package name embedded in a store's URL or page source, e.g. "com.example.app". Domain names are skipped.
+_EMBEDDED_PKG_RE = re.compile(r"\b((?:com|net|org|in|io|co)\.[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]+)+)\b")
+_DOMAIN_TLDS = (".com", ".net", ".org", ".io", ".co", ".in")
+
+
+def embedded_package(text: str) -> str:
+    """The first package name in `text` that is not a domain name, or "" when there is none."""
+    for m in _EMBEDDED_PKG_RE.finditer(text):
+        if not m.group(1).endswith(_DOMAIN_TLDS):
+            return m.group(1)
+    return ""
+
+
+def brand_words(brand: str) -> set[str]:
+    """The lower-cased words of a brand name that a result must contain to count (short words are ignored)."""
+    return {t.lower() for t in fold_homoglyphs(brand).split() if len(t) >= 3}
+
+
+def scraped_hit(
+    adapter: SourceAdapter, query: str, *, url: str, host_name: str, host_domain: str,
+    group: str | None = None, hit_type: HitType = HitType.app_listing, hit_id: str | None = None, **fields,
+) -> Hit:
+    """A hit read from a scraped page. Its id is the hash of its URL, and the adapter's name, method and host group
+    are filled in. Whatever the page gives (app name, package, publisher, icon...) is passed in as `fields`."""
+    return Hit(
+        id=hit_id or hashlib.sha256(url.encode()).hexdigest()[:32],
+        type=hit_type,
+        url=url,
+        host=HostInfo(group=group or adapter.host_group, name=host_name, domain=host_domain, is_official_store=False),
+        found_via=[FoundVia(source=adapter.name, method=adapter.method, query=query)],
+        relevance_score=0,
+        discovered_at=datetime.datetime.now(datetime.timezone.utc),
+        **fields,
+    )
+
+
 def country_label(term: str, country: str, countries: list[str]) -> str:
     """Query label of a hit: with several countries the country is part of it, so the per-query result cap
     applies per country instead of squeezing every country into one budget."""
@@ -147,9 +187,19 @@ class SourceAdapter(ABC):
 
     async def _run(self, ctx: ScanContext) -> tuple[list[Hit], SourceStatus]:
         """Wrapper that times execution, caps results, and catches all exceptions."""
+        from app.config.settings import get_settings
+
         start = time.monotonic()
+        limit = get_settings().source_timeout_seconds
         try:
-            hits, status = await self.search(ctx)
+            try:
+                hits, status = await asyncio.wait_for(self.search(ctx), limit)
+            except TimeoutError:
+                log.warning("%s: stopped after %ss", self.name, limit)
+                return [], SourceStatus(
+                    name=self.name, method=self.method, status="failed", results=0,
+                    error=f"timed out after {limit}s", duration_ms=int((time.monotonic() - start) * 1000),
+                )
             # Enforce the result cap centrally, per distinct query — keep the
             # first N hits of each query (identified by found_via[0].query).
             raw = len(hits)

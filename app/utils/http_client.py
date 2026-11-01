@@ -9,14 +9,15 @@ import random
 import re
 import threading
 import time
-from typing import Callable, TypeVar
+from collections.abc import Callable
+from typing import TypeVar
 from urllib.parse import urlparse
 
 import httpcore
 import httpx
-import redis.asyncio as aioredis
 
 from app.config.settings import get_settings
+from app.storage.redis_client import rate_limit_client
 from app.utils.rate_limiter import RateLimiter
 from app.utils.ssrf_guard import SSRFError, check_url, resolve_safe
 from app.utils.url_tools import is_download_url
@@ -165,12 +166,7 @@ async def _get_rate_limiter() -> RateLimiter | None:
         async with _tl.rl_lock:
             if getattr(_tl, "rate_limiter", None) is None:
                 try:
-                    # Bounded pool: the default pool allows 100 sockets per thread, and four threads at that cap
-                    # flooded Redis with 400+ connections. A blocked acquire waits up to 2 s, then fails open.
-                    pool = aioredis.BlockingConnectionPool.from_url(
-                        get_settings().redis_url, max_connections=16, timeout=2,
-                    )
-                    _tl.rate_limiter = RateLimiter(aioredis.Redis(connection_pool=pool))
+                    _tl.rate_limiter = RateLimiter(rate_limit_client())
                 except Exception as e:
                     log.warning("rate limiter unavailable (fail-open, no throttling): %s", e)
                     return None

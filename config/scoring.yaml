@@ -1,7 +1,7 @@
 # config/scoring.yaml
 # Scoring ruleset — weights and thresholds for relevance scoring.
 # Increment ruleset_version whenever weights or signals change.
-ruleset_version: "v9"
+ruleset_version: "v10"
 
 weights:
   # Name / title similarity (rapidfuzz ratio on homoglyph-folded strings)
@@ -40,7 +40,7 @@ signals:
   lure_keyword_in_title: 5             # "mod", "cracked", "premium", "free"
   domain_has_brand_plus_keyword: 6     # petpooja-apk.com
   tld_swap: 4                          # petpooja.net vs petpooja.com
-  package_id_suffix_variation: 5       # com.petpooja.fake vs com.petpooja.billing
+  package_id_suffix_variation: 5       # com.sbi.yonobd.fake vs com.sbi.yonobd (shared id, suffixed)
   # Domain Jaro-Winkler lookalike (catches homoglyph/subtle substitution attacks)
   domain_jw_lookalike: 12              # multiplied by jw_sim (0.85–1.0)
   # pHash icon similarity vs official app icon

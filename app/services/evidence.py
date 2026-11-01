@@ -27,6 +27,7 @@ from app.api.models import EvidenceRecord, Hit
 from app.config.settings import get_settings
 from app.services.page_assessment import assess_page
 from app.services.scoring import high_risk_threshold
+from app.utils.browser import browser_context
 from app.utils.http_client import FetchError, fetch, is_blocked_message
 from app.utils.ssrf_guard import SSRFError, check_url
 from app.utils.url_tools import is_download_url
@@ -78,21 +79,13 @@ async def _guard_request(route) -> None:
 
 
 async def _shoot(url: str, dest: Path) -> None:
-    from playwright.async_api import async_playwright
-
-    async with async_playwright() as p:
-        # A new browser every time: no profile, cookies or history carry over between pages
-        browser = await p.chromium.launch()
-        try:
-            # Downloads are refused and no permissions are granted: the page's JavaScript runs,
-            # but it cannot save files or use the camera, location and so on
-            context = await browser.new_context(accept_downloads=False)
-            await context.route("**/*", _guard_request)
-            page = await context.new_page()
-            await page.goto(url, timeout=_SCREENSHOT_TIMEOUT_MS, wait_until="networkidle")
-            await page.screenshot(path=str(dest), full_page=True)
-        finally:
-            await browser.close()
+    # The scan's browser; its contexts refuse downloads and grant no permissions, so the page's JavaScript runs
+    # but cannot save files or use the camera or location
+    async with browser_context() as context:
+        await context.route("**/*", _guard_request)
+        page = await context.new_page()
+        await page.goto(url, timeout=_SCREENSHOT_TIMEOUT_MS, wait_until="networkidle")
+        await page.screenshot(path=str(dest), full_page=True)
 
 
 async def _screenshot(url: str, dest: Path) -> str | None:
@@ -110,7 +103,7 @@ async def _screenshot(url: str, dest: Path) -> str | None:
     try:
         await asyncio.wait_for(_shoot(url, dest), _SCREENSHOT_SECONDS)
         return None
-    except asyncio.TimeoutError:
+    except TimeoutError:
         log.warning("evidence: screenshot of %s exceeded %ss", url, _SCREENSHOT_SECONDS)
         return f"screenshot exceeded {_SCREENSHOT_SECONDS}s"
     except Exception as exc:
@@ -178,7 +171,7 @@ async def capture_hit(
     scan_id: str, hit: Hit, brand: str | None = None, official_domain: str | None = None,
 ) -> EvidenceRecord:
     """Save evidence for one hit and return the record to attach to it. Keeps what discovery recorded."""
-    captured_at = datetime.datetime.now(datetime.timezone.utc)
+    captured_at = datetime.datetime.now(datetime.UTC)
     out = evidence_dir(scan_id, hit.id)
     # The probe's check is kept; its "unreachable" note is not, because this capture is a new attempt
     record = (

@@ -215,7 +215,6 @@ def test_create_scan_full_body(client):
         "official_domain": "petpooja.com",
         "keywords": ["petpooja", "billing"],
         "depth": 2,
-        "callback_url": "https://webhook.example.com/notify",
     }
     resp = client.post("/v1/scans", json=body, headers=HEADERS)
     assert resp.status_code == 202

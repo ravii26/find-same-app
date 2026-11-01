@@ -8,8 +8,8 @@ from pathlib import Path
 # Project root = directory containing this package (test_new/)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
-from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -46,12 +46,10 @@ class Settings(BaseSettings):
     # Scan Limits
     max_keywords: int = 60
     max_response_bytes: int = 10 * 1024 * 1024  # 10 MB
-    max_apk_bytes: int = 100 * 1024 * 1024  # 100 MB
     scan_timeout_seconds: int = 600
-    # One source may run this long; then it is stopped and reported as failed, so it cannot hold up the scan.
-    source_timeout_seconds: int = 300
-    # Collection stops this many seconds before scan_timeout_seconds, keeping time for scoring and the report.
-    scan_finish_reserve_seconds: int = 120
+    # One source that hangs (a download that trickles in, so no read ever times out) must not use up the scan's
+    # time: it is stopped and reported as failed. Below scan_timeout_seconds, so scoring still has time to run.
+    source_timeout_seconds: int = 240
 
     # HTTP Client
     http_connect_timeout: float = 10.0
@@ -66,10 +64,6 @@ class Settings(BaseSettings):
     # API Keys (optional)
     github_token: str = ""
     gitlab_token: str = ""
-    virustotal_api_key: str = ""
-    otx_api_key: str = ""
-    malwarebazaar_api_key: str = ""
-    urlhaus_api_key: str = ""
 
     # Evidence capture
     evidence_max_hits: int = 25
@@ -86,32 +80,12 @@ class Settings(BaseSettings):
     elasticsearch_shards: int = 1
     elasticsearch_replicas: int = 1
 
-    # Webhook
-    webhook_timeout: int = 10
-
     # Evidence capture
     capture_evidence: bool = False
 
     def scan_ceiling_seconds(self) -> int:
         """Hard limit for one scan."""
         return self.scan_timeout_seconds
-
-    def collection_seconds(self) -> int:
-        """Time the sources get before collection stops and the scan moves on to scoring (at least 30 s)."""
-        return max(30, self.scan_timeout_seconds - self.scan_finish_reserve_seconds)
-
-    @field_validator("data_dir", "uploads_dir", mode="before")
-    @classmethod
-    def coerce_path(cls, v: str | Path) -> Path:
-        return Path(v)
-
-    def resolve_upload_path(self, name: str) -> Path:
-        """Resolve a caller-supplied path against UPLOADS_DIR; ValueError if it escapes."""
-        root = self.uploads_dir.resolve()
-        path = (root / name).resolve()
-        if not path.is_relative_to(root):
-            raise ValueError("apk_path must be inside UPLOADS_DIR")
-        return path
 
     def default_country_list(self) -> list[str]:
         codes = [c.strip().upper() for c in self.default_countries.split(",") if c.strip()]
@@ -128,9 +102,6 @@ class Settings(BaseSettings):
 
     def scan_result_dir(self, scan_id: str) -> Path:
         return self.results_dir() / scan_id
-
-    def scan_output_path(self, scan_id: str) -> Path:
-        return self.scan_result_dir(scan_id) / "output.json"
 
     def scan_log_path(self, scan_id: str) -> Path:
         return self.scan_result_dir(scan_id) / "scan.log"

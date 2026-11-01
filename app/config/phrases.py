@@ -11,7 +11,7 @@ from typing import Any
 import yaml
 
 _PATH = Path(__file__).resolve().parent.parent.parent / "config" / "phrases.yaml"
-_LISTS = ("lure_suffixes", "lure_words", "scam_words", "search_queries")
+_LISTS = ("lure_suffixes", "lure_words", "scam_words", "bait_words", "search_queries")
 
 # Localized extras added per country, so a request with many countries cannot flood the search.
 MAX_LOCALIZED_SUFFIXES = 12

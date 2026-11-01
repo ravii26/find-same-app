@@ -12,17 +12,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 from rapidfuzz import fuzz
 
-from app.api.models import Hit, ScanRequest
+from app.api.models import Hit, HitType, ScanRequest
 from app.config.phrases import word_regex
-from app.services.brand_match import exact_in, presence, presence_any
+from app.services.brand_match import compact, exact_in, is_brand_name, presence, presence_any
 from app.services.keyword_expansion import fold_homoglyphs
 from app.utils.url_tools import decode_idn, registrable_domain
 
@@ -46,12 +46,22 @@ def _fuzzy(a: str, b: str) -> float:
     return fuzz.WRatio(fold_homoglyphs(a), fold_homoglyphs(b)) / 100.0
 
 
+def _package_core(package_id: str) -> str:
+    """The id without its leading reverse-domain part ("com."). Every Android id starts with one, and
+    comparing it too lets an unrelated id reach the suffix-variation gate just by sharing "com."."""
+    head, sep, rest = package_id.partition(".")
+    return rest if sep else package_id
+
+
 # Word lists come from config/phrases.yaml (all markets/languages: a listing can be in any language).
 _LURE_RE = word_regex("lure_words")
 
 
 # Vocabulary of banking/payment scams: the file or page is named for the *lure*, not just the brand.
 _SCAM_RE = word_regex("scam_words")
+
+# Mod/hack/coupon wording: next to the brand name it ties an app to the brand ("Coupon Codes for Zomato").
+_BAIT_RE = word_regex("bait_words")
 
 # Shared hosting platforms: a brand name in a *subdomain* here is not the brand's own site.
 _FREE_HOSTING = (
@@ -132,12 +142,14 @@ def _score_one(
 
     # Package ID similarity against every official Android id, so each package of a multi-app brand counts
     official_pkgs = brand_packages or ((android_package,) if android_package else ())
+    # Package ids are compared without case: mirrors often list them lower-cased
+    is_official_pkg = (hit_package_id or "").lower() in {p.lower() for p in official_pkgs}
     if hit_package_id and official_pkgs:
-        pkg_sim = max(_fuzzy(hit_package_id, p) for p in official_pkgs)
+        pkg_sim = max(_fuzzy(_package_core(hit_package_id), _package_core(p)) for p in official_pkgs)
         score += pkg_sim * weights["package_similarity"] * 100
         if pkg_sim > 0.85:
             reasons.append(f"package ID '{hit_package_id}' closely matches official package")
-        if hit_package_id not in official_pkgs and pkg_sim > 0.7:
+        if not is_official_pkg and pkg_sim > 0.7:
             score += signals["package_id_suffix_variation"]
             reasons.append("package ID has suffix variation of official ID")
 
@@ -217,7 +229,7 @@ def _score_one(
     # Companion/utility app for the brand: not an impersonation attempt
     if (
         match == "exact" and not is_official_match
-        and hit_package_id not in official_pkgs
+        and not is_official_pkg
         and is_companion_app(name, brand_name)
     ):
         score -= signals.get("companion_app_penalty", 15)
@@ -248,7 +260,7 @@ def _score_one(
         if name:
             parts.append(f"name similarity {_fuzzy(name, brand_name):.0%}")
         if hit_package_id and android_package:
-            parts.append(f"package similarity {_fuzzy(hit_package_id, android_package):.0%}")
+            parts.append(f"package similarity {_fuzzy(_package_core(hit_package_id), _package_core(android_package)):.0%}")
         if hit_host_group:
             parts.append(f"host group {hit_host_group.replace('_', ' ')}")
         reasons.append("weak match: " + (", ".join(parts) if parts else "no individual signal"))
@@ -293,6 +305,11 @@ async def score_hit(hit: Hit, request: ScanRequest, official_publishers: set[str
     from app.services.allowlist import _norm_publisher
 
     publisher_is_official = bool(hit.publisher and _norm_publisher(hit.publisher) in official_publishers)
+    # An App Store hit is compared with the brand's iOS bundle ids as well as its Android ids: brands often reuse
+    # one id on both stores, and their iOS ids can follow another pattern (com.sbi.YONOUK vs com.YONOUKMobileApp).
+    packages = tuple(request.android_packages)
+    if hit.host and hit.host.domain == "apps.apple.com":
+        packages = tuple(dict.fromkeys([*request.ios_bundles, *request.android_packages]))
     loop = asyncio.get_event_loop()
     score, reasons = await loop.run_in_executor(
         _executor,
@@ -311,24 +328,31 @@ async def score_hit(hit: Hit, request: ScanRequest, official_publishers: set[str
         publisher_is_official,
         hit.snippet,
         tuple(request.brand_aliases),
-        tuple(request.android_packages),
+        packages,
     )
     return hit.model_copy(update={"relevance_score": score, "reasons": reasons})
 
 
-async def _enrich_phash(hits: list[Hit], brand_name: str = "", icon_cache: dict[str, str] | None = None) -> list[Hit]:
-    """Add icon_similarity to non-official hits by comparing pHash against the
-    official app's icon.  Only runs when an official hit with icon_url exists."""
+async def _enrich_phash(
+    hits: list[Hit], brand_name: str = "", icon_cache: dict[str, str] | None = None,
+    reference_icon_url: str | None = None,
+) -> list[Hit]:
+    """Add icon_similarity to non-official hits by comparing pHash against the official app's icon.
+
+    The reference is an official hit's icon when one is among the hits, otherwise the brand's own icon from its
+    store listing (reference_icon_url). Without either there is nothing to compare with.
+    """
     try:
         from app.utils.phash import compute_phash, phash_similarity
     except ImportError:
         return hits
 
     official = next((h for h in hits if h.is_official_match and h.icon_url), None)
-    if not official:
+    reference = official.icon_url if official else reference_icon_url
+    if not reference:
         return hits
 
-    official_hash = await compute_phash(official.icon_url, cache=icon_cache)  # type: ignore[arg-type]
+    official_hash = await compute_phash(reference, cache=icon_cache)  # type: ignore[arg-type]
     if not official_hash:
         return hits
 
@@ -391,7 +415,11 @@ async def _enrich_permission_similarity(
 
     from app.services.play_listing import (
         android_excess_dangerous as excess_dangerous,
+    )
+    from app.services.play_listing import (
         android_permission_jaccard as permission_jaccard,
+    )
+    from app.services.play_listing import (
         fetch_permissions,
     )
 
@@ -460,6 +488,62 @@ async def _enrich_permission_similarity(
     return list(await asyncio.gather(*[_enrich_one(h) for h in hits]))
 
 
+# A store or mirror listing must show evidence beyond its name before it is reported. Unrelated apps that share a
+# brand's common word ("Bob") carry only the name, and that is what floods the report.
+_ICON_MATCH = 0.80   # same pHash level that earns the icon bonus
+_APP_ID_MATCH = 0.85
+# Aliases this short ("BOB") are also everyday words and names, so an app named after one claims nothing
+_MIN_ALIAS_LEN = 4
+
+
+def _claims_the_brand(hit: Hit, request: ScanRequest) -> bool:
+    """An app listing that presents itself as the brand: it is named the brand ("Zomato" by another publisher), or
+    pairs the brand with scam, mod or coupon wording ("Free Coupon Codes for Zomato"). Impersonators copy only the
+    name, so their publisher, app id and icon are their own and the other evidence never fires for them.
+    "Bob World: Super Bro Run Game" only contains the brand and claims neither."""
+    name = hit.app_name or hit.title
+    if hit.type != HitType.app_listing or not name:
+        return False
+    brands = [request.brand_name, *(a for a in request.brand_aliases if len(compact(a)) >= _MIN_ALIAS_LEN)]
+    if any(is_brand_name(b, name) for b in brands):
+        return True
+    return bool(_BAIT_RE.search(name) or _SCAM_RE.search(name)) and any(exact_in(b, name) for b in brands)
+
+
+def _has_evidence_beyond_name(hit: Hit, request: ScanRequest, official_publishers: set[str] | frozenset[str]) -> bool:
+    """Publisher, app id, official domain, a close icon, or the app claims to be the brand. A description is not
+    used: for a common brand word it only repeats the name ("Bob HR" describes itself as "Bob's mobile app")."""
+    from app.services.allowlist import _norm_publisher
+
+    if hit.is_official_match or _claims_the_brand(hit, request):
+        return True
+    if hit.publisher and _norm_publisher(hit.publisher) in official_publishers:
+        return True
+    if hit.icon_similarity is not None and hit.icon_similarity >= _ICON_MATCH:
+        return True
+    ids = request.official_app_ids()
+    own_ids = ids["ios"] if hit.host and hit.host.domain == "apps.apple.com" else ids["android"]
+    if hit.package_id and any(
+        _fuzzy(_package_core(hit.package_id), _package_core(p)) >= _APP_ID_MATCH for p in own_ids
+    ):
+        return True
+    official_domains = {registrable_domain(d) for d in [request.official_domain, *request.official_domains] if d}
+    return bool(official_domains and registrable_domain(hit.url) in official_domains)
+
+
+def _gate_name_only(hit: Hit, request: ScanRequest, official_publishers: set[str] | frozenset[str]) -> Hit:
+    """Keep a name-only app listing or code repo under the reporting threshold; it stays in the audit list with the reason."""
+    if hit.type not in (HitType.app_listing, HitType.repo) or _has_evidence_beyond_name(hit, request, official_publishers):
+        return hit
+    return hit.model_copy(update={
+        "relevance_score": min(hit.relevance_score, min_relevance_for(hit) - 1),
+        "reasons": hit.reasons + [
+            "no evidence beyond the name: no brand publisher, similar app id, official domain or similar icon, "
+            "and the app is neither named the brand nor pairs it with scam or mod wording"
+        ],
+    })
+
+
 async def score_hits(
     hits: list[Hit],
     request: ScanRequest,
@@ -467,26 +551,27 @@ async def score_hits(
     icon_cache: dict[str, str] | None = None,
     official_publishers: set[str] | frozenset[str] = frozenset(),
     dropped: list[Hit] | None = None,
-    enrich: bool = True,
+    reference_icon_url: str | None = None,
 ) -> list[Hit]:
     """Score all hits concurrently, enrich with permission similarity + pHash,
     return sorted by score desc. Hits under the reporting threshold are appended to `dropped` when given,
-    so the caller can count them instead of losing them silently.
-
-    enrich=False skips the permission and icon checks, which make network calls (used when a scan has stopped
-    early and must still rank what it found)."""
+    so the caller can count them instead of losing them silently. reference_icon_url is the brand's own icon, for
+    icon comparison when its listing is not among the hits."""
     tasks = [score_hit(h, request, official_publishers) for h in hits]
     scored = list(await asyncio.gather(*tasks))
 
     # Permission similarity enrichment (official permissions read from Google Play)
-    if enrich and official_permissions:
+    if official_permissions:
         scored = await _enrich_permission_similarity(
             scored, official_permissions, request.brand_name, official_package=request.android_package,
         )
 
     # pHash enrichment — uses pre-populated cache from parallel prefetch if available
-    if enrich:
-        scored = await _enrich_phash(scored, request.brand_name, icon_cache=icon_cache)
+    scored = await _enrich_phash(
+        scored, request.brand_name, icon_cache=icon_cache, reference_icon_url=reference_icon_url,
+    )
+
+    scored = [_gate_name_only(h, request, official_publishers) for h in scored]
 
     filtered = [h for h in scored if h.relevance_score >= min_relevance_for(h)]
     if dropped is not None:

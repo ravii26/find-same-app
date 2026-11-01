@@ -197,6 +197,19 @@ def exact_in(brand: str, text: str | None) -> bool:
     return bool(text) and _exact(brand, text)
 
 
+def _name_core(text: str | None) -> str:
+    return "".join(w for w in _words(text) if w not in GENERIC_WORDS and w not in _LURE_SUFFIXES)
+
+
+def is_brand_name(brand: str, name: str | None) -> bool:
+    """Is `name` the brand itself, apart from generic words and lure suffixes ("Zomato", "Zomato App", "SBI Official")?
+
+    Stricter than exact_in: "Bob World: Super Bro Run Game" contains "Bob World" but is not named "Bob World".
+    """
+    core = _name_core(brand)
+    return bool(core) and _name_core(name) == core
+
+
 def count_mentions(text: str | None, brand: str) -> int:
     """How many times the brand appears in free text (exact; short brands as whole words)."""
     if not text:

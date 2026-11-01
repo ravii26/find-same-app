@@ -16,8 +16,8 @@ import logging
 import os
 import subprocess
 import sys
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
 
 import redis.asyncio as aioredis
 from fastapi import FastAPI, Request
@@ -25,9 +25,10 @@ from fastapi.responses import JSONResponse
 from filelock import FileLock, Timeout
 
 from app.api.routes.brand_details import router as brand_details_router
-from app.api.routes.brands import router as brands_router
 from app.api.routes.scans import router as scans_router
 from app.config.settings import get_settings
+from app.services.scan_queue import promote_pending
+from app.storage.redis_client import api_client
 from app.utils.http_client import close_client
 
 log = logging.getLogger(__name__)
@@ -78,8 +79,6 @@ _REAP_SECONDS = 30
 
 async def _reap_loop(redis: aioredis.Redis) -> None:
     """Every _REAP_SECONDS: free the slots of scans whose worker died, and start the waiting scans."""
-    from app.jobs.actors import promote_pending
-
     while True:
         try:
             await promote_pending(redis)
@@ -111,13 +110,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
         sys.exit(1)
 
-    # Redis connection pool
-    pool = aioredis.ConnectionPool.from_url(
-        settings.redis_url,
-        max_connections=settings.redis_max_connections,
-        decode_responses=False,
-    )
-    app.state.redis = aioredis.Redis(connection_pool=pool)
+    app.state.redis = api_client()
 
     # Embedded Dramatiq worker (killed automatically on shutdown). Skipped when a worker container consumes the queues.
     global _worker_proc
@@ -128,7 +121,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "app.jobs.actors",
                 "--processes", "1",
                 "--threads", str(settings.max_concurrent_scans),
-                "--queues", "scans", "webhooks", "discovery",
+                "--queues", "scans",
             ],
             stdout=sys.stdout,
             stderr=sys.stderr,
@@ -173,7 +166,6 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(scans_router)
-    app.include_router(brands_router)
     app.include_router(brand_details_router)
 
     @app.get("/health", tags=["health"])

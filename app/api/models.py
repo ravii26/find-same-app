@@ -7,8 +7,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
-
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # ── Enums ─────────────────────────────────────────────────────────────────────
 
@@ -45,11 +44,24 @@ class KeywordType(str, Enum):
 
 # ── Input schema ──────────────────────────────────────────────────────────────
 
+class ScanCreate(BaseModel):
+    """What POST /v1/scans accepts: a brand name. The brand's details are read from its stored record, so any other
+    field is refused."""
+    model_config = ConfigDict(extra="forbid")
+
+    brand_name: str = Field(..., min_length=1, max_length=200)
+
+    @field_validator("brand_name")
+    @classmethod
+    def not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("give brand_name")
+        return v
+
+
 class ScanRequest(BaseModel):
-    # Required unless brand_id is given: the brand's details are then read from its stored record
+    # The brand's name. Its stored record (aliases, keywords, domains, store links) is merged into this request.
     brand_name: str = Field("", max_length=200)
-    # A brand stored through /v1/brand-details: its name, aliases, domains and Play links are merged into this request
-    brand_id: str | None = Field(None, max_length=64)
     # Other names the brand goes by, e.g. "YONO" for "YONO SBI". An app name containing one counts as the brand.
     brand_aliases: list[str] = Field(default_factory=list)
     # The brand's own ids. A package id is unique per store, so each id counts only on its platform:
@@ -61,6 +73,10 @@ class ScanRequest(BaseModel):
     allowlist_packages: list[str] = Field(default_factory=list)   # other legit app IDs, e.g. a business app
     official_publishers: list[str] = Field(default_factory=list)  # developer names on official stores
     official_domains: list[str] = Field(default_factory=list)     # other official registrable domains
+    # The brand's store accounts: Google Play developer ids and App Store seller ids (artistId). The store owns
+    # these ids, so every app an account publishes on that store is the brand's own (see services/allowlist.py).
+    play_developer_ids: list[str] = Field(default_factory=list)
+    app_store_seller_ids: list[str] = Field(default_factory=list)
     keywords: list[str] = Field(default_factory=list)
 
     # The body as the client sent it, before a confirmed brand was merged in. Set by the API and reported as the
@@ -68,9 +84,9 @@ class ScanRequest(BaseModel):
     submitted: dict | None = Field(None, exclude=True)
 
     @model_validator(mode="after")
-    def brand_name_or_brand_id(self):
-        if not self.brand_id and not self.brand_name.strip():
-            raise ValueError("give brand_name, or brand_id of a stored brand")
+    def needs_brand_name(self):
+        if not self.brand_name.strip():
+            raise ValueError("give brand_name")
         return self
 
     @model_validator(mode="before")
@@ -93,6 +109,11 @@ class ScanRequest(BaseModel):
         """The first iOS bundle id, for code that compares against one id. Read-only: send ios_bundles."""
         return self.ios_bundles[0] if self.ios_bundles else None
 
+    def is_name_only(self) -> bool:
+        """No own app, domain or publisher to compare against: only the brand name is known."""
+        return not (self.android_packages or self.ios_bundles or self.official_domain or self.official_domains
+                    or self.official_publishers)
+
     def official_app_ids(self) -> dict[str, set[str]]:
         """The brand's own app ids per platform: {"android": {...}, "ios": {...}}, lower-cased."""
         return {
@@ -107,7 +128,7 @@ class ScanRequest(BaseModel):
 
         data = self.model_dump(mode="json")
         for key in ("keywords", "allowlist_packages", "official_publishers", "official_domains",
-                    "android_packages", "ios_bundles", "brand_aliases"):
+                    "android_packages", "ios_bundles", "brand_aliases", "play_developer_ids", "app_store_seller_ids"):
             data[key] = sorted({str(v).strip().lower() for v in data[key]})
         for key in ("brand_name", "official_domain"):
             if data[key]:
@@ -116,7 +137,7 @@ class ScanRequest(BaseModel):
         return hashlib.sha256(blob.encode()).hexdigest()
 
     @field_validator("allowlist_packages", "official_publishers", "official_domains", "android_packages", "ios_bundles",
-                     "brand_aliases")
+                     "brand_aliases", "play_developer_ids", "app_store_seller_ids")
     @classmethod
     def clean_allowlist(cls, v: list[str]) -> list[str]:
         if len(v) > 200:
@@ -178,8 +199,13 @@ class Hit(BaseModel):
     package_id: str | None = None
     version: str | None = None
     publisher: str | None = None
+    # The store's id of the publishing account (Google Play developer id, App Store artistId). Set only from
+    # Google Play and the App Store themselves, never from a third-party site.
+    developer_id: str | None = None
     icon_url: str | None = None
     snippet: str | None = None
+    # The store's own description, from the search response we already read (no extra request)
+    description: str | None = None
     apk_url: str | None = None
     url: str
     host: HostInfo | None = None
@@ -256,6 +282,9 @@ class ScanReport(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     expanded_keywords: list[Keyword] = Field(default_factory=list)
     source_statuses: list[SourceStatus] = Field(default_factory=list)
+    # Official domains read from the brand's Google Play listing for this scan (not stored on the brand record):
+    # [{"domain": "bankofbaroda.com", "from": "developerWebsite"}]
+    derived_official_domains: list[dict[str, str]] = Field(default_factory=list)
     # Final scan status (same values as ScanStatus) and, for a failed scan, why it stopped early.
     # A failed report still carries whatever was found before the failure.
     status: str | None = None
@@ -269,5 +298,8 @@ class ScanContext(BaseModel):
     request: ScanRequest
     expanded_keywords: list[Keyword]
     official_permissions: list[str] = Field(default_factory=list)
+    # The brand's own icon from Google Play: the reference for icon comparison, even when the brand's listing is
+    # allowlisted and so not among the hits
+    official_icon_url: str | None = None
 
     model_config = {"arbitrary_types_allowed": True}

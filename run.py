@@ -36,7 +36,7 @@ COMMANDS = {
         PYTHON, "-m", "dramatiq", "app.jobs.actors",
         "--processes", "1",
         "--threads", "4",
-        "--queues", "scans", "webhooks", "discovery",
+        "--queues", "scans",
     ],
 }
 
@@ -125,7 +125,7 @@ if __name__ == "__main__":
     elif arg in COMMANDS:
         targets = [arg]
     else:
-        print(f"Usage: python run.py [api|worker|both|restart]")
+        print("Usage: python run.py [api|worker|both|restart]")
         sys.exit(1)
 
     run(targets)

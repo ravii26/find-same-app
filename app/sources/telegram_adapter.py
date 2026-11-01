@@ -16,7 +16,6 @@ Rate limits: ~1 req/s on both t.me and lyzem.com.
 
 from __future__ import annotations
 
-import datetime
 import hashlib
 import logging
 import re
@@ -26,16 +25,14 @@ import urllib.parse
 from selectolax.lexbor import LexborHTMLParser as HTMLParser
 
 from app.api.models import (
-    FoundVia,
     Hit,
     HitType,
-    HostInfo,
     ScanContext,
     SourceMethod,
     SourceStatus,
 )
 from app.services.brand_match import distinctive_tokens, mentions_any
-from app.sources.base import SourceAdapter
+from app.sources.base import SourceAdapter, scraped_hit
 from app.utils.http_client import BlockedError, FetchError, decode_response, fetch
 
 log = logging.getLogger(__name__)
@@ -260,24 +257,18 @@ class TelegramAdapter(SourceAdapter):
             is_apk_channel = "apk" in channel.lower() or "apk" in text.lower() or bool(apk_url)
             host_group = "apk_site" if is_apk_channel else self.host_group
             hits.append(
-                Hit(
-                    id=uid,
-                    type=HitType.channel_post,
+                scraped_hit(
+                    self,
+                    channel,
+                    url=msg_href,
+                    host_name="Telegram",
+                    host_domain="t.me",
+                    group=host_group,
+                    hit_id=uid,
+                    hit_type=HitType.channel_post,
                     app_name=channel_name,
                     title=f"Telegram @{channel}: {text[:120]}",
-                    url=msg_href,
                     apk_url=apk_url,
-                    host=HostInfo(
-                        group=host_group,
-                        name="Telegram",
-                        domain="t.me",
-                        is_official_store=False,
-                    ),
-                    found_via=[
-                        FoundVia(source=self.name, method=self.method, query=channel)
-                    ],
-                    relevance_score=0,
-                    discovered_at=datetime.datetime.now(datetime.timezone.utc),
                 )
             )
 

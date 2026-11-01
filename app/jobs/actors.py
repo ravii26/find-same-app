@@ -1,12 +1,12 @@
 # app/jobs/actors.py
 """
-Dramatiq actors for scan execution and webhook delivery.
+Dramatiq actor for scan execution.
 
 Two-queue model:
 - Queue 1 (pending): Redis list of scans waiting for a slot (status_store).
 - Queue 2 (running): Redis set capped at MAX_CONCURRENT_SCANS. Only scans in it are handed to Dramatiq
   (queue "scans"), so a message in Dramatiq always has a slot and is never retried or dropped for lack of one.
-- When a scan finishes it leaves queue 2 and `promote_pending()` moves the next pending scan in.
+- When a scan finishes it leaves queue 2 and `scan_queue.promote_pending()` moves the next pending scan in.
 """
 
 from __future__ import annotations
@@ -21,9 +21,10 @@ import redis.asyncio as aioredis
 from app.api.models import ScanRequest, ScanStatus
 from app.config.settings import get_settings
 from app.jobs.broker import get_broker
-from app.services import brand_store, discovery
 from app.services.orchestrator import run_scan
+from app.services.scan_queue import promote_pending
 from app.storage import result_store, scan_log, status_store
+from app.storage.redis_client import worker_client
 from app.utils.http_client import close_client, close_rate_limiter
 
 log = logging.getLogger(__name__)
@@ -34,63 +35,8 @@ get_broker()
 _HEARTBEAT_SECONDS = 30
 
 
-def _make_redis() -> aioredis.Redis:
-    """Create a fresh Redis client bound to the current event loop.
-
-    Each scan runs inside asyncio.run() which creates and then closes its own
-    event loop. aioredis connections are loop-bound, so a client cannot be
-    shared across scans — each scan must own its own client and close it before
-    asyncio.run() exits.
-    """
-    return aioredis.Redis.from_url(
-        get_settings().redis_url, max_connections=5, decode_responses=False
-    )
-
-
 def _now() -> datetime.datetime:
-    return datetime.datetime.now(datetime.timezone.utc)
-
-
-async def promote_pending(redis: aioredis.Redis) -> None:
-    """Fill free slots of the running queue from the pending queue and hand those scans to the worker."""
-    for scan_id in await status_store.reap_lost(redis):
-        scan_log.append_sync(get_settings().scan_log_path(scan_id), scan_id, "ERROR", "worker lost; scan abandoned")
-    for scan_id in await status_store.promote(redis):
-        request_dict = await status_store.take_request(redis, scan_id)
-        if request_dict is None:  # deleted while pending
-            await status_store.remove_from_running(redis, scan_id)
-            continue
-        scan_actor.send(scan_id, request_dict)
-
-
-@dramatiq.actor(queue_name="discovery", max_retries=0, time_limit=10 * 60 * 1000)
-def discover_brand_actor(brand_id: str) -> None:
-    """Find the candidate apps for one brand record (see services/discovery). Runs on the discovery queue."""
-    asyncio.run(_run_discovery(brand_id))
-
-
-async def _run_discovery(brand_id: str) -> None:
-    record = brand_store.load(brand_id)
-    if record is None:
-        log.warning("discovery: brand %s not found", brand_id)
-        return
-    payload = record["input"]
-    record["status"] = "running"
-    brand_store.save(record)
-    try:
-        # Records made before the link lists existed hold one link under the singular key
-        play_urls = payload.get("play_store_urls") or [u for u in [payload.get("play_store_url")] if u]
-        app_urls = payload.get("app_store_urls") or [u for u in [payload.get("app_store_url")] if u]
-        result = await discovery.discover(
-            play_urls, app_urls, payload["brand_name"], payload.get("aliases", []), payload.get("country", "in"),
-        )
-        brand_store.set_candidates(record, result)
-        log.info("discovery: brand %s found %d candidates", brand_id, len(result["candidates"]))
-    except discovery.DiscoveryError as exc:
-        brand_store.set_failed(record, str(exc))
-    except Exception as exc:  # any other failure is recorded on the brand, not raised to the worker
-        log.exception("discovery: brand %s failed", brand_id)
-        brand_store.set_failed(record, f"{type(exc).__name__}: {exc}")
+    return datetime.datetime.now(datetime.UTC)
 
 
 @dramatiq.actor(queue_name="scans", max_retries=0, time_limit=get_settings().scan_ceiling_seconds() * 1000 + 120_000)
@@ -133,21 +79,11 @@ def _indexing_problem(indexed: dict | None) -> str | None:
 
 
 
-async def _remember_official_apps(scan_id: str, report, request: ScanRequest, log_path) -> None:
-    """Keep the brand's own apps this scan allowlisted on the brand record, so later scans allowlist them too."""
-    from app.storage import brand_index
-    try:
-        apps = brand_index.official_from_report(report, request)
-        if apps:
-            await brand_index.record_allowlist(request.brand_id, apps)
-        scan_log.append_sync(log_path, scan_id, "INFO", f"brand allowlist: {len(apps)} official app(s) kept")
-    except Exception as exc:  # the scan's report is already written; the brand record is only updated
-        scan_log.append_sync(log_path, scan_id, "WARN", f"brand allowlist not updated: {exc}")
 
 
 async def _execute_scan(scan_id: str, request_dict: dict) -> None:
     settings = get_settings()
-    redis = _make_redis()
+    redis = worker_client()  # its own client: this scan's event loop closes with it
     log_path = settings.scan_log_path(scan_id)
     beat = asyncio.create_task(_heartbeat(redis, scan_id))
     try:
@@ -170,9 +106,6 @@ async def _execute_scan(scan_id: str, request_dict: dict) -> None:
         scan_log.append_sync(
             log_path, scan_id, "INFO", f"scan finished — status={final.value} results={report.summary.total_results}"
         )
-
-        if request.brand_id:
-            await _remember_official_apps(scan_id, report, request, log_path)
 
         from app.storage import es_store
         indexed = await es_store.index_report(report, request, final.value)  # always runs; never raises

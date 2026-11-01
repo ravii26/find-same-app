@@ -9,23 +9,19 @@ Coverage: Xiaomi/MIUI ecosystem — large India/SEA market share where rogue app
 
 from __future__ import annotations
 
-import datetime
 import hashlib
 import json as _json
 import logging
 from urllib.parse import urlencode
 
 from app.api.models import (
-    FoundVia,
     Hit,
-    HitType,
-    HostInfo,
     ScanContext,
     SourceMethod,
     SourceStatus,
 )
 from app.services.brand_match import brand_terms
-from app.sources.base import SourceAdapter, country_label, scan_countries
+from app.sources.base import SourceAdapter, country_label, scan_countries, scraped_hit
 from app.utils.http_client import FetchError, fetch
 
 log = logging.getLogger(__name__)
@@ -83,24 +79,21 @@ class GetAppsAdapter(SourceAdapter):
                             if icon_path else None
                         )
 
-                        hits.append(Hit(
-                            id=uid,
-                            type=HitType.app_listing,
+                        hits.append(scraped_hit(
+                            self,
+                            country_label(term, country, countries),
+                            url=listing_url,
+                            host_name="GetApps (Xiaomi)",
+                            host_domain="global.app.mi.com",
+                            is_official_store=True,
+                            hit_id=uid,
                             title=item.get("displayName"),
                             app_name=item.get("displayName"),
                             package_id=pkg,
-                            publisher=item.get("developerName"),
+                            # publisherName is the GetApps account that lists the app ("Aptoide" for apps GetApps
+                            # re-hosts from Aptoide); developerName is only sometimes present
+                            publisher=item.get("publisherName") or item.get("developerName"),
                             icon_url=icon_url,
-                            url=listing_url,
-                            host=HostInfo(
-                                group=self.host_group,
-                                name="GetApps (Xiaomi)",
-                                domain="global.app.mi.com",
-                                is_official_store=True,
-                            ),
-                            found_via=[FoundVia(source=self.name, method=self.method, query=country_label(term, country, countries))],
-                            relevance_score=0,
-                            discovered_at=datetime.datetime.now(datetime.timezone.utc),
                         ))
 
         return hits, SourceStatus(

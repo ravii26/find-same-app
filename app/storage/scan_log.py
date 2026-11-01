@@ -14,7 +14,7 @@ from pathlib import Path
 
 
 def _ts() -> str:
-    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def append_sync(log_path: Path, scan_id: str, level: str, message: str) -> None:

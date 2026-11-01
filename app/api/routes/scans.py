@@ -4,25 +4,18 @@
 from __future__ import annotations
 
 import asyncio
-import datetime
 from typing import Annotated
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
-from ulid import ULID
 
 from app.api.middleware.auth import require_api_key
-from app.api.models import ScanRequest, ScanStatus
-from app.config.settings import get_settings
-from app.jobs.actors import promote_pending
-from app.services import discovery
-from app.storage import brand_index
-from app.storage import result_store, scan_log, status_store
+from app.api.models import ScanCreate, ScanRequest, ScanStatus
+from app.services import discovery, scan_queue
+from app.storage import brand_index, result_store, status_store
 
 router = APIRouter(prefix="/v1", tags=["scans"])
-
-_ACTIVE = (ScanStatus.queued, ScanStatus.running)
 
 
 def _scan_id(scan_id: str) -> str:
@@ -53,8 +46,17 @@ def _source_detail(sources: list) -> list:
     ]
 
 
-def _queued(scan_id: str) -> JSONResponse:
-    return JSONResponse(status_code=202, content={"scan_id": scan_id, "message": "Job queued"})
+def _queued(scan_id: str, warning: str | None = None) -> JSONResponse:
+    content = {"scan_id": scan_id, "message": "Job queued"}
+    if warning:
+        content["warning"] = warning
+    return JSONResponse(status_code=202, content=content)
+
+
+def _name_only_warning(brand_name: str) -> str:
+    return (f"No brand named '{brand_name}' is stored, so this is a name-only scan: only apps named exactly like "
+            f"the brand or pairing it with scam, mod or coupon wording are reported. Store the brand with "
+            f"POST /v1/brand-details for a full scan.")
 
 
 async def _own_apps(details: dict) -> list[dict[str, str]]:
@@ -73,48 +75,34 @@ async def _own_apps(details: dict) -> list[dict[str, str]]:
 
 @router.post("/scans", status_code=status.HTTP_202_ACCEPTED, response_model=None)
 async def create_scan(
-    body: ScanRequest,
+    payload: ScanCreate,
     request: Request,
     _: Annotated[str, Depends(require_api_key)],
 ):
     """Queue a scan. An identical request (same dedup_hash) that is still queued or
     running returns that scan instead of starting a second one."""
-    settings = get_settings()
     redis = _redis(request)
-    submitted = body.model_dump(mode="json", exclude={"submitted"})
+    submitted = payload.model_dump(mode="json")
+    body = ScanRequest(brand_name=payload.brand_name)
 
-    if body.brand_id:
-        try:
-            details = await brand_index.read(body.brand_id)
-        except brand_index.BrandNotFound as exc:
-            raise HTTPException(status_code=404, detail="brand not found") from exc
-        except brand_index.BrandIndexUnavailable as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+    # The brand's stored record is read by name. A name with no stored brand is a name-only scan.
+    try:
+        details = await brand_index.read(payload.brand_name)
+    except brand_index.BrandNotFound:
+        details = None
+    except brand_index.BrandIndexUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if details:
         own_apps = await _own_apps(details)
         body = brand_index.merge_into_request(body, details, own_apps)
     body = body.model_copy(update={"submitted": submitted})
+    warning = None if details else _name_only_warning(payload.brand_name)
 
-    in_flight = await status_store.running_count(redis) + await status_store.pending_count(redis)
-    if in_flight >= settings.max_queue_depth:
-        raise HTTPException(status_code=429, detail="Queue is full", headers={"Retry-After": "60"})
-
-    scan_id = "scn_" + str(ULID())
-    request_hash = body.dedup_hash()
-    holder = await status_store.claim_dedup(redis, request_hash, scan_id)
-    if holder:
-        holder_status = await status_store.get_status(redis, holder)
-        if holder_status in _ACTIVE:
-            return _queued(holder)
-        await status_store.replace_dedup(redis, request_hash, scan_id)  # previous scan is finished
-
-    result_store.ensure_scan_dir(scan_id)
-    scan_log.append_sync(settings.scan_log_path(scan_id), scan_id, "INFO", "scan accepted")
-    now = datetime.datetime.now(datetime.timezone.utc)
-    await status_store.set_status(redis, scan_id, ScanStatus.queued)
-    await status_store.set_meta(redis, scan_id, brand_name=body.brand_name, created_at=now)
-    await status_store.add_pending(redis, scan_id, {**body.model_dump(), "submitted": submitted})
-    await promote_pending(redis)  # starts it right away if a slot is free
-    return _queued(scan_id)
+    try:
+        scan_id = await scan_queue.submit(redis, body, submitted)
+    except scan_queue.QueueFull:
+        raise HTTPException(status_code=429, detail="Queue is full", headers={"Retry-After": "60"}) from None
+    return _queued(scan_id, warning)
 
 
 # ── GET /v1/progress/{id} ────────────────────────────────────────────────────────
@@ -136,7 +124,7 @@ async def get_progress(
             raise HTTPException(status_code=404, detail="Scan not found")
         s = ScanStatus(report.status or ScanStatus.completed.value)
 
-    meta = await status_store.get_meta(redis, scan_id) or result_store.read_meta(scan_id) or {}
+    meta = await status_store.get_meta(redis, scan_id) or {}
     total_sources = len(get_all_adapters())
     sources = await status_store.get_sources(redis, scan_id)
     base = {
@@ -167,7 +155,7 @@ async def get_progress(
         })
 
     # Finished — derive status and return progress shape only (no results)
-    # Finished: report the status the scan recorded, the same one the report and the webhook carry.
+    # Finished: report the status the scan recorded, the same one the report carries.
     # (Deriving it from source counts gave "partial" and "completed" for scans the report marks otherwise.)
     report = report or result_store.read_result(scan_id)
     if report is not None:

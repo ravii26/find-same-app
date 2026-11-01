@@ -3,7 +3,8 @@
 Covers the three problems found by a live scan:
   1. Browser scrapers (Samsung, Uptodown) reported `ok, 0 results` when no page loaded.
   2. Unreachable hosts were retried on every query until the scan hit its time limit.
-  3. A scan that stopped early reported its hits unscored and left unfinished sources out of the report.
+  3. A scan that stopped early reported its hits unscored and left unfinished sources out of the report
+     (now handled by the orchestrator's _rank_unfinished and the per-source limit in SourceAdapter._run).
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ import pytest
 
 from app.api.models import FoundVia, Hit, HitType, HostInfo, ScanContext, ScanRequest, SourceMethod, SourceStatus
 from app.services.keyword_expansion import expand
-from app.sources.base import note_page_error
+from app.sources.base import SourceAdapter, note_page_error
 
 # ── 1. Browser scrapers report blocked / failed, not ok ───────────────────────
 
@@ -37,20 +38,14 @@ class _FakePage:
         pass
 
 
-def _fake_playwright(goto):
-    """async_playwright() stand-in whose pages answer goto() with `goto`."""
+def _fake_browser_context(goto):
+    """browser_context() stand-in whose pages answer goto() with `goto`."""
     browser_ctx = MagicMock()
     browser_ctx.new_page = AsyncMock(side_effect=lambda: _FakePage(goto))
-    browser_ctx.add_init_script = AsyncMock()
-    browser = MagicMock()
-    browser.new_context = AsyncMock(return_value=browser_ctx)
-    browser.close = AsyncMock()
-    pw = MagicMock()
-    pw.chromium.launch = AsyncMock(return_value=browser)
 
     @asynccontextmanager
     async def _cm():
-        yield pw
+        yield browser_ctx
 
     return _cm
 
@@ -86,8 +81,7 @@ async def _http_403(url):
 async def test_browser_scraper_that_loads_no_page_is_not_ok(module, cls, goto, expected):
     import importlib
     mod = importlib.import_module(module)
-    with patch.object(mod, "_PLAYWRIGHT_OK", True), \
-         patch.object(mod, "_async_playwright", _fake_playwright(goto)), \
+    with patch.object(mod, "browser_context", _fake_browser_context(goto)), \
          patch.object(mod, "throttle", AsyncMock()):
         hits, status = await getattr(mod, cls)().search(_ctx())
     assert hits == []
@@ -195,17 +189,17 @@ def _hit(title: str, url: str) -> Hit:
     )
 
 
-def _adapter(name: str, hits: list[Hit], delay: float = 0.0):
-    adapter = MagicMock()
-    adapter.name = name
-    adapter.method = SourceMethod.api
+class _Adapter(SourceAdapter):
+    """A real adapter (so SourceAdapter._run and its time limit apply) that answers after `delay` seconds."""
+    method = SourceMethod.api
+    host_group = "apk_site"
 
-    async def _run(ctx):
-        await asyncio.sleep(delay)
-        return hits, SourceStatus(name=name, method=SourceMethod.api, status="ok", results=len(hits))
+    def __init__(self, name: str, hits: list[Hit], delay: float = 0.0):
+        self.name, self._hits, self._delay = name, hits, delay
 
-    adapter._run = _run
-    return adapter
+    async def search(self, ctx):
+        await asyncio.sleep(self._delay)
+        return self._hits, SourceStatus(name=self.name, method=self.method, status="ok", results=len(self._hits))
 
 
 def _status_store():
@@ -215,24 +209,24 @@ def _status_store():
     return ss
 
 
-def _settings(**overrides):
-    from app.config.settings import Settings
-    return Settings(**overrides)
-
-
 async def _scan(adapters, settings, request=None):
     from app.services.orchestrator import run_scan
     request = request or ScanRequest(brand_name="PhonePe", official_publishers=["PhonePe Private Limited"])
     with patch("app.services.orchestrator.get_all_adapters", return_value=adapters), \
          patch("app.services.orchestrator.status_store", _status_store()), \
-         patch("app.services.orchestrator.get_settings", return_value=settings):
+         patch("app.services.orchestrator.get_settings", return_value=settings), \
+         patch("app.config.settings.get_settings", return_value=settings):
         return await run_scan("scn_test", request, AsyncMock())
 
 
+def _fake_hit():
+    return _hit("PhonePe Rewards Mod APK", "https://aptoide.com/app/rewards")
+
+
 async def test_slow_source_is_stopped_at_its_own_time_limit():
-    fast = _adapter("fast", [_hit("PhonePe Rewards Mod APK", "https://aptoide.com/app/rewards")])
-    slow = _adapter("slow", [], delay=30)
-    report = await _scan([fast, slow], _settings(source_timeout_seconds=1))
+    from app.config.settings import Settings
+    report = await _scan([_Adapter("fast", [_fake_hit()]), _Adapter("slow", [], delay=30)],
+                         Settings(source_timeout_seconds=1))
 
     statuses = {s.name: s for s in report.source_statuses}
     assert statuses["slow"].status == "failed"
@@ -241,30 +235,12 @@ async def test_slow_source_is_stopped_at_its_own_time_limit():
     assert report.results and report.results[0].relevance_score > 0
 
 
-async def test_collection_deadline_reports_unfinished_sources_and_scores_the_rest():
-    fast = _adapter("fast", [_hit("PhonePe Rewards Mod APK", "https://aptoide.com/app/rewards")])
-    slow = _adapter("slow", [], delay=60)
-    # scan limit 40 s, reserve 39 s -> collection gets the 30 s minimum; the slow source exceeds it
-    settings = _settings(scan_timeout_seconds=40, scan_finish_reserve_seconds=39, source_timeout_seconds=300)
-    with patch.object(type(settings), "collection_seconds", lambda self: 1):
-        report = await _scan([fast, slow], settings)
-
-    statuses = {s.name: s for s in report.source_statuses}
-    assert set(statuses) == {"fast", "slow"}
-    assert statuses["slow"].status == "failed" and "did not finish" in statuses["slow"].error
-    assert report.error is None
-    assert report.results and report.results[0].relevance_score > 0
-    assert any("did not finish" in w for w in report.warnings)
-
-
 async def test_scan_stopped_early_still_scores_and_lists_every_source():
-    fast = _adapter("fast", [_hit("PhonePe Rewards Mod APK", "https://aptoide.com/app/rewards")])
-    slow = _adapter("slow", [], delay=60)
-    settings = _settings(source_timeout_seconds=300)
-    # The whole scan stops (as at SCAN_TIMEOUT_SECONDS) while collection is still waiting for the slow source
-    with patch.object(type(settings), "scan_ceiling_seconds", lambda self: 1), \
-         patch.object(type(settings), "collection_seconds", lambda self: 300):
-        report = await _scan([fast, slow], settings)
+    from app.config.settings import Settings
+    settings = Settings(source_timeout_seconds=300)
+    # The whole scan stops (as at SCAN_TIMEOUT_SECONDS) while the slow source is still running
+    with patch.object(type(settings), "scan_ceiling_seconds", lambda self: 1):
+        report = await _scan([_Adapter("fast", [_fake_hit()]), _Adapter("slow", [], delay=60)], settings)
 
     assert report.error and "timed out" in report.error
     statuses = {s.name: s for s in report.source_statuses}
@@ -273,4 +249,3 @@ async def test_scan_stopped_early_still_scores_and_lists_every_source():
     assert report.results, "hits found before the stop are kept"
     assert all(h.relevance_score > 0 for h in report.results), "and they are scored"
     assert "Results were not scored." not in report.warnings
-    assert any("without the icon and permission checks" in w for w in report.warnings)
