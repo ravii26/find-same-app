@@ -1,44 +1,34 @@
 # app/storage/brand_index.py
-"""Brand details in Elasticsearch: one document per brand, _id = brand_id.
+"""Brand details in Elasticsearch: one document per brand, keyed by its name.
 
-Index: {ELASTICSEARCH_INDEX_PREFIX}-brands (default "rogue-brands"). A document holds the fields of the
-POST /v1/brand-details body, plus brand_id, allowlisted_apps, created_at and updated_at. The index is created on
-first use.
+Index: {ELASTICSEARCH_INDEX_PREFIX}-brands (default "rogue-brands"). The document _id is the brand name, lower-cased
+with spaces collapsed, so a second brand with the same name cannot be created: Elasticsearch refuses the write.
+A brand is read, changed and deleted by its name. Allowlisted apps are not stored here for now.
 """
 
 from __future__ import annotations
 
 import datetime
-import re
 from typing import Any
 
-from elasticsearch import BadRequestError, NotFoundError
+from elasticsearch import BadRequestError, ConflictError, NotFoundError
 from elasticsearch import ConnectionError as ESConnectionError
 from elasticsearch import TransportError
-from ulid import ULID
 
 from app.config.settings import Settings, get_settings
-from app.api.models import ScanReport, ScanRequest
+from app.api.models import ScanRequest
 from app.storage import es_store
-
-_ID_RE = re.compile(r"^brd_[0-9A-HJKMNP-TV-Z]{26}$")  # ULID with a brd_ prefix
 
 BRAND_MAPPING: dict[str, Any] = {
     "dynamic": False,
     "properties": {
-        "brand_id": {"type": "keyword"},
         "brand_name": {"type": "text", "fields": {"raw": {"type": "keyword", "ignore_above": 256}}},
         "play_store_urls": {"type": "keyword"},
         "app_store_urls": {"type": "keyword"},
         "official_domains": {"type": "keyword"},
         "aliases": {"type": "keyword"},
+        "keywords": {"type": "keyword"},
         "country": {"type": "keyword"},
-        "allowlisted_apps": {"properties": {
-            "store": {"type": "keyword"},
-            "id": {"type": "keyword"},
-            "name": {"type": "text"},
-            "publisher": {"type": "keyword"},
-        }},
         "created_at": {"type": "date"},
         "updated_at": {"type": "date"},
     },
@@ -46,7 +36,11 @@ BRAND_MAPPING: dict[str, Any] = {
 
 
 class BrandNotFound(Exception):
-    """No brand with that id."""
+    """No brand with that name."""
+
+
+class BrandExists(Exception):
+    """A brand with that name is already stored."""
 
 
 class BrandIndexUnavailable(Exception):
@@ -55,6 +49,11 @@ class BrandIndexUnavailable(Exception):
 
 def index_name(settings: Settings | None = None) -> str:
     return f"{(settings or get_settings()).elasticsearch_index_prefix}-brands"
+
+
+def name_key(name: str) -> str:
+    """The unique key of a brand name: case and extra spaces do not make a second brand."""
+    return " ".join(name.split()).casefold()
 
 
 def _now() -> str:
@@ -84,111 +83,72 @@ async def _with_client(action):
         await client.close()
 
 
-def valid_brand_id(brand_id: str) -> bool:
-    return bool(_ID_RE.match(brand_id or ""))
-
-
-def _check_id(brand_id: str) -> None:
-    if not valid_brand_id(brand_id):
-        raise BrandNotFound(brand_id)
+async def _fetch(client: Any, index: str, name: str) -> dict[str, Any]:
+    key = name_key(name)
+    if not key:
+        raise BrandNotFound(name)
+    try:
+        resp = await client.get(index=index, id=key)
+    except NotFoundError as exc:
+        raise BrandNotFound(name) from exc
+    return resp["_source"]
 
 
 async def create(details: dict[str, Any]) -> dict[str, Any]:
-    """Store a new brand under a new unique id (brd_ + ULID)."""
-    brand_id = "brd_" + str(ULID())
+    """Store a new brand. The name must not be stored already."""
     now = _now()
-    doc = {"brand_id": brand_id, **details, "allowlisted_apps": [], "created_at": now, "updated_at": now}
+    doc = {**details, "created_at": now, "updated_at": now}
+    key = name_key(details["brand_name"])
 
     async def action(client, index):
-        await client.index(index=index, id=brand_id, document=doc, refresh="wait_for")
+        try:
+            await client.create(index=index, id=key, document=doc, refresh="wait_for")
+        except ConflictError as exc:
+            raise BrandExists(details["brand_name"]) from exc
         return doc
 
     return await _with_client(action)
 
 
-async def read(brand_id: str) -> dict[str, Any]:
-    _check_id(brand_id)
-
+async def read(name: str) -> dict[str, Any]:
+    """The brand with this name."""
     async def action(client, index):
-        try:
-            resp = await client.get(index=index, id=brand_id)
-        except NotFoundError as exc:
-            raise BrandNotFound(brand_id) from exc
-        return resp["_source"]
+        return await _fetch(client, index, name)
 
     return await _with_client(action)
 
 
-async def update(brand_id: str, details: dict[str, Any]) -> dict[str, Any]:
-    """Replace the brand's details. created_at is kept; updated_at is set to now."""
-    _check_id(brand_id)
+async def update(name: str, details: dict[str, Any]) -> dict[str, Any]:
+    """Replace the brand's details. created_at is kept; updated_at is set to now.
 
-    async def action(client, index):
-        try:
-            current = (await client.get(index=index, id=brand_id))["_source"]
-        except NotFoundError as exc:
-            raise BrandNotFound(brand_id) from exc
-        doc = {
-            "brand_id": brand_id, **details, "allowlisted_apps": current.get("allowlisted_apps", []),
-            "created_at": current["created_at"], "updated_at": _now(),
-        }
-        await client.index(index=index, id=brand_id, document=doc, refresh="wait_for")
-        return doc
-
-    return await _with_client(action)
-
-
-async def delete(brand_id: str) -> None:
-    _check_id(brand_id)
-
-    async def action(client, index):
-        try:
-            await client.delete(index=index, id=brand_id, refresh=True)
-        except NotFoundError as exc:
-            raise BrandNotFound(brand_id) from exc
-
-    await _with_client(action)
-
-
-_OFFICIAL_SOURCES = {"Google Play": "play", "Apple App Store": "app_store"}
-
-
-def official_from_report(report: ScanReport, request: ScanRequest) -> list[dict[str, str]]:
-    """The brand's own apps this scan allowlisted, to keep on the brand record for later scans.
-
-    Only apps listed on their own store (Google Play or the App Store) count, and only when the id is one the
-    brand declares for that platform and the publisher is known. A copy on another store is never kept.
+    A new name moves the document to the new key. That fails with BrandExists when another brand has the name.
     """
-    ids = request.official_app_ids()
-    found: dict[tuple[str, str], dict[str, str]] = {}
-    for item in report.allowlisted:
-        store = _OFFICIAL_SOURCES.get(item.source or "")
-        if not store or not item.package_id or not item.publisher:
-            continue
-        platform = "android" if store == "play" else "ios"
-        if item.package_id.strip().lower() not in ids[platform]:
-            continue
-        found.setdefault((store, item.package_id), {
-            "store": store, "id": item.package_id, "name": item.app_name or "", "publisher": item.publisher,
-        })
-    return list(found.values())
-
-
-async def record_allowlist(brand_id: str, apps: list[dict[str, str]]) -> dict[str, Any]:
-    """Keep apps on the brand record. Each (store, id) is stored once; the first record is kept."""
-    _check_id(brand_id)
-
     async def action(client, index):
+        current = await _fetch(client, index, name)
+        doc = {**details, "created_at": current["created_at"], "updated_at": _now()}
+        current_key, new_key = name_key(name), name_key(details["brand_name"])
+        if new_key == current_key:
+            await client.index(index=index, id=current_key, document=doc, refresh="wait_for")
+            return doc
         try:
-            current = (await client.get(index=index, id=brand_id))["_source"]
-        except NotFoundError as exc:
-            raise BrandNotFound(brand_id) from exc
-        kept = {(a["store"], a["id"]): a for a in current.get("allowlisted_apps", [])}
-        for app in apps:
-            kept.setdefault((app["store"], app["id"]), app)
-        doc = {**current, "allowlisted_apps": list(kept.values())}
-        await client.index(index=index, id=brand_id, document=doc, refresh="wait_for")
+            await client.create(index=index, id=new_key, document=doc, refresh="wait_for")
+        except ConflictError as exc:
+            raise BrandExists(details["brand_name"]) from exc
+        await client.delete(index=index, id=current_key, refresh="wait_for")
         return doc
+
+    return await _with_client(action)
+
+
+async def delete(name: str) -> dict[str, Any]:
+    """Remove the brand with this name and return what was removed."""
+    async def action(client, index):
+        current = await _fetch(client, index, name)
+        try:
+            await client.delete(index=index, id=name_key(name), refresh="wait_for")
+        except NotFoundError as exc:
+            raise BrandNotFound(name) from exc
+        return current
 
     return await _with_client(action)
 
@@ -197,23 +157,20 @@ def merge_into_request(body: ScanRequest, doc: dict[str, Any], own_apps: list[di
     """The scan request with a stored brand's details added. Values the request already gives are kept.
 
     own_apps are the apps behind the brand's store links, read from their stores by the caller (discovery.listed_app).
-    Apps kept on the brand record by earlier scans are added as well. Each app adds its id on its platform and its
-    publisher. The store accounts of the own_apps (their developer_id) are added too, so every app those accounts
-    publish is allowlisted. The brand's name, aliases and official domains are added too, and the brand name is
-    taken from the stored brand when the request has none.
+    Each app adds its id on its platform and its publisher. The store accounts of the own_apps (their developer_id)
+    are added too, so every app those accounts publish is allowlisted. The brand's aliases, keywords and official
+    domains are added too.
     """
-    apps = [*own_apps, *doc.get("allowlisted_apps", [])]
-    domains = doc.get("official_domains", [])
-    play = [a["id"] for a in apps if a["store"] == "play"]
-    ios = [a["id"] for a in apps if a["store"] == "app_store"]
-    publishers = [a["publisher"] for a in apps if a.get("publisher")]
-    # Only from own_apps: those were just read from the store behind the customer's own links
+    play = [a["id"] for a in own_apps if a["store"] == "play"]
+    ios = [a["id"] for a in own_apps if a["store"] == "app_store"]
+    publishers = [a["publisher"] for a in own_apps if a.get("publisher")]
     play_devs = [a["developer_id"] for a in own_apps if a["store"] == "play" and a.get("developer_id")]
     sellers = [a["developer_id"] for a in own_apps if a["store"] == "app_store" and a.get("developer_id")]
+    domains = doc.get("official_domains", [])
     return body.model_copy(update={
-        "brand_id": doc["brand_id"],
-        "brand_name": body.brand_name or doc["brand_name"],
+        "brand_name": doc["brand_name"],
         "brand_aliases": list(dict.fromkeys([*body.brand_aliases, *doc.get("aliases", [])])),
+        "keywords": list(dict.fromkeys([*body.keywords, *doc.get("keywords", [])])),
         "android_packages": list(dict.fromkeys([*body.android_packages, *play])),
         "ios_bundles": list(dict.fromkeys([*body.ios_bundles, *ios])),
         "official_publishers": list(dict.fromkeys([*body.official_publishers, *publishers])),

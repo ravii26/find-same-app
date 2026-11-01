@@ -67,15 +67,13 @@ def test_app_store_seller_id_allowlists_the_sellers_apps():
 # ── where the account ids come from ───────────────────────────────────────────
 
 def test_merge_takes_accounts_from_the_brands_own_links_only():
-    doc = {"brand_id": "brd_X", "brand_name": "YONO SBI", "allowlisted_apps": [
-        {"store": "play", "id": "com.kept", "publisher": "State Bank of India", "developer_id": "Kept+Earlier"},
-    ]}
+    doc = {"brand_name": "YONO SBI"}
     own = [
         {"store": "play", "id": "com.sbi.lotusintouch", "publisher": "State Bank of India",
          "developer_id": "State+Bank+of+India"},
         {"store": "app_store", "id": "com.sbi.YONOBD", "publisher": "State Bank of India", "developer_id": "503784436"},
     ]
-    merged = brand_index.merge_into_request(ScanRequest(brand_id="brd_X"), doc, own)
+    merged = brand_index.merge_into_request(ScanRequest(brand_name="YONO SBI"), doc, own)
     assert merged.play_developer_ids == ["State+Bank+of+India"]
     assert merged.app_store_seller_ids == ["503784436"]
 
@@ -108,6 +106,24 @@ async def test_only_play_hits_showing_a_brand_publisher_are_looked_up(monkeypatc
 
 
 # ── fixes found alongside ─────────────────────────────────────────────────────
+
+def test_unrelated_id_sharing_only_the_com_prefix_gets_no_package_points():
+    # com.bob.ai shares only "com." with a bank's ids; it must not gain package points or the suffix bonus
+    _, reasons = _score_one(
+        "x", "Bob.AI", "com.bob.ai", "Bob AI", "https://play.google.com/store/apps/details?id=com.bob.ai", "official_store",
+        "Bank of Baroda", "com.bankofbaroda.mconnect", None,
+        brand_packages=("com.bankofbaroda.mconnect", "com.bankofbaroda.upi"),
+    )
+    assert not any("suffix variation" in r or "package ID" in r for r in reasons)
+
+
+def test_suffixed_variant_of_an_official_id_still_gets_the_suffix_bonus():
+    _, reasons = _score_one(
+        "x", "Yono Fake", "com.sbi.yonobd.fake", "Fake Publisher", "https://aptoide.com/x", "apk_site",
+        "YONO SBI", "com.sbi.yonobd", None, brand_packages=("com.sbi.yonobd",),
+    )
+    assert any("suffix variation" in r for r in reasons)
+
 
 def test_lower_cased_official_package_is_not_a_suffix_variation():
     _, reasons = _score_one(

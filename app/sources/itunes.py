@@ -71,6 +71,7 @@ class ItunesAdapter(SourceAdapter):
                         version=item.get("version"),
                         publisher=item.get("sellerName") or item.get("artistName"),
                         developer_id=str(item["artistId"]) if item.get("artistId") else None,
+                        description=(item.get("description") or "")[:1000] or None,
                         url=track_url,
                         host=HostInfo(
                             group=self.host_group,

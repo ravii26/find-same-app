@@ -53,7 +53,7 @@ def test_threshold_follows_the_source_group():
 
 
 def test_aliases_reach_the_scan_request_through_the_brand_record():
-    doc = {"brand_id": "brd_01HZX0000000000000000000AB", "brand_name": "YONO SBI", "aliases": ["YONO"]}
+    doc = {"brand_name": "YONO SBI", "aliases": ["YONO"]}
     merged = brand_index.merge_into_request(ScanRequest(brand_name="YONO SBI", brand_aliases=["Yono Bank"]), doc, [])
     assert merged.brand_aliases == ["Yono Bank", "YONO"]
 

@@ -102,16 +102,6 @@ def _indexing_problem(indexed: dict | None) -> str | None:
 
 
 
-async def _remember_official_apps(scan_id: str, report, request: ScanRequest, log_path) -> None:
-    """Keep the brand's own apps this scan allowlisted on the brand record, so later scans allowlist them too."""
-    from app.storage import brand_index
-    try:
-        apps = brand_index.official_from_report(report, request)
-        if apps:
-            await brand_index.record_allowlist(request.brand_id, apps)
-        scan_log.append_sync(log_path, scan_id, "INFO", f"brand allowlist: {len(apps)} official app(s) kept")
-    except Exception as exc:  # the scan's report is already written; the brand record is only updated
-        scan_log.append_sync(log_path, scan_id, "WARN", f"brand allowlist not updated: {exc}")
 
 
 async def _execute_scan(scan_id: str, request_dict: dict) -> None:
@@ -139,9 +129,6 @@ async def _execute_scan(scan_id: str, request_dict: dict) -> None:
         scan_log.append_sync(
             log_path, scan_id, "INFO", f"scan finished — status={final.value} results={report.summary.total_results}"
         )
-
-        if request.brand_id:
-            await _remember_official_apps(scan_id, report, request, log_path)
 
         from app.storage import es_store
         indexed = await es_store.index_report(report, request, final.value)  # always runs; never raises

@@ -88,8 +88,8 @@ Both the API (embedded worker, when `EMBEDDED_WORKER=true`) and `run.py` start a
 The example brand is YONO SBI, the mobile banking app of State Bank of India. Ids and counts come from real runs.
 
 ```
- 1. POST /v1/brand-details          -> 201 {brand_id, ...}
- 2. POST /v1/scans  (brand_id)      -> 202 {scan_id}
+ 1. POST /v1/brand-details          -> 201 {"message": "Brand added"}
+ 2. POST /v1/scans  (brand_name)    -> 202 {scan_id}
  3. worker: scan job                 (sources, store accounts, allowlist, scoring, threshold)
  4. GET  /v1/progress/{scan_id}     -> status, progress   and   data/results/<scan_id>/output.json
 ```
@@ -105,31 +105,42 @@ Content-Type: application/json
 ```json
 {
   "brand_name": "YONO SBI",
-  "aliases": ["YONO"],
-  "country": "in",
   "play_store_urls": ["https://play.google.com/store/apps/details?id=com.sbi.lotusintouch"],
   "app_store_urls": ["https://apps.apple.com/in/app/yono-sbi-bangladesh/id1556426905"],
-  "official_domains": ["onlinesbi.sbi"]
+  "official_domains": ["onlinesbi.sbi"],
+  "aliases": ["YONO"],
+  "keywords": ["login", "kyc update"],
+  "country": "in"
 }
+```
+
+Response, 201:
+
+```json
+{"brand_name": "YONO SBI", "message": "Brand added"}
 ```
 
 | Field | Required | Rule |
 |---|---|---|
-| `brand_name` | yes | 1 to 200 characters |
+| `brand_name` | yes | 1 to 200 characters, spaces collapsed. It needs at least one letter or digit. It is the brand's key: see below. |
 | `play_store_urls` | one link in the two lists | Google Play details links with an `id` parameter, up to 20. Otherwise 422. |
 | `app_store_urls` | one link in the two lists | App Store links with an `/id<number>` path, up to 20. Otherwise 422. |
-| `aliases` | no | Other names for the brand. Up to 20. |
-| `official_domains` | no | Brand domains. Up to 20. |
+| `official_domains` | no | Brand domains, up to 20. A full URL is cleaned to its host (`https://www.Bank.co.in/x` is stored as `bank.co.in`). Anything that is not a domain is 422. |
+| `aliases` | no | Other names for the brand, up to 20. Repeats (any case) are dropped, and an alias equal to the brand name is dropped. |
+| `keywords` | no | Search terms besides the brand name, up to 50, each up to 100 characters. Repeats (any case) are dropped. |
 | `country` | no | Two letters, default `in`. The storefront the brand's links are read from. |
 
+- The brand name is unique. Case and extra spaces do not make a second brand, so a second POST with the same name
+  returns 409 "brand already exists".
+- Any field not in this table is refused with 422. Allowlisted apps are not accepted here, and they are not stored.
 - `play_store_url` and `app_store_url` (one link each) are still accepted and added to the lists.
 - Sending no store link returns 422 with "give play_store_urls, app_store_urls or both".
-- `sibling_brands` is refused with 422. It was removed.
 - One link per account is enough: every app that account publishes on that store is cleared. Add a link for each
   other account the brand publishes under (for example a payments subsidiary).
 
-The brand is stored in Elasticsearch (`rogue-brands`); `GET`, `PUT` and `DELETE /v1/brand-details/{brand_id}` read,
-replace and remove it. Without Elasticsearch these calls return 503.
+The brand is stored in Elasticsearch (`rogue-brands`), and the brand name is its key. `GET`, `PUT` and `DELETE`
+`/v1/brand-details/{brand_name}` read, replace and remove it. A `PUT` that renames the brand to a name another brand
+already has returns 409 and changes nothing. An unknown name returns 404. Without Elasticsearch these calls return 503.
 
 ### Step 2: start a scan
 
@@ -140,16 +151,16 @@ Content-Type: application/json
 ```
 
 ```json
-{
-  "brand_name": "YONO SBI",
-  "brand_id": "brd_01M684F1HBG8A15AB3EJ3AVBM7",
-  "official_domains": ["yonoretail.sbi.bank.in"]
-}
+{"brand_name": "YONO SBI"}
 ```
+
+The body takes only `brand_name`. Any other field is refused with 422, so every detail of the brand comes from its
+stored record. A brand is found by its name, in any case.
 
 **What happens before the scan runs**
 
-1. The API loads the brand. Unknown brand: 404. Elasticsearch unreachable: 503.
+1. The API reads the stored brand by name. A name with no stored brand still runs, as a name-only scan. Elasticsearch
+   unreachable: 503.
 2. Each of the brand's store links is read from its store. A store that cannot be read: 503, so no app is
    allowlisted on a guessed publisher.
 3. The request is saved as sent. This becomes the report's `query`.
@@ -162,8 +173,8 @@ Content-Type: application/json
 | Publisher names of those apps | `official_publishers` |
 | Developer ids of those Play apps | `play_developer_ids` |
 | Seller ids (`artistId`) of those App Store apps | `app_store_seller_ids` |
-| Apps kept from earlier scans (`allowlisted_apps`) | `android_packages`, `ios_bundles`, `official_publishers` |
 | Aliases | `brand_aliases` |
+| Keywords | `keywords` |
 | Official domains | `official_domains` (added to the ones you send) |
 
 5. An identical request that is still queued or running returns the existing scan instead of starting another. The check uses a hash of the merged request.
@@ -228,10 +239,11 @@ Other endpoints:
 
 | Input | Required | Where |
 |---|---|---|
-| Brand name | yes | `brand_name` |
-| At least one store link | yes | `play_store_urls` or `app_store_urls` (both allowed) |
-| Official domains | recommended | `official_domains` on the brand and the scan |
+| Brand name | yes | `brand_name` (the brand's key, and the only field a scan takes) |
+| At least one store link | yes | `play_store_urls` or `app_store_urls` on the brand (both allowed) |
+| Official domains | recommended | `official_domains` on the brand |
 | Aliases | no | `aliases` on the brand |
+| Keywords | no | `keywords` on the brand |
 
 Brand logos are not an input yet. Icon comparison is in the scoring code, but the scan does not use a logo supplied by the customer.
 
@@ -244,7 +256,9 @@ Brand logos are not an input yet. Icon comparison is in the scoring code, but th
 **Removed inputs**
 
 - `sibling_brands`: refused with 422.
-- `android_package` and `ios_bundle` on a scan: refused with 422. Use `android_packages` and `ios_bundles`.
+- `brand_id` on a scan or a brand: refused with 422. The brand name is the only key.
+- `allowlisted_apps` on a brand: refused with 422, and not stored. Apps are cleared from the brand's store links at scan time.
+- `android_package`, `ios_bundle`, `countries` and every other scan field (`android_packages`, `official_domains`, `keywords`, ...) on a scan: refused with 422. They live on the brand record.
 - `countries` on a scan: refused with 422. Scans search the storefronts from settings (see [section 10](#10-configuration)).
 
 ---
@@ -452,7 +466,7 @@ Keywords are built from the brand name and the aliases before the sources run. T
 | `package_guess` | 7 | Package ids guessed from the brand, for code and APK search | `com.yonosbi.app`, `com.yonosbi.billing`, `com.yonosbi.pro`, `com.yonosbi.lite`, `com.yonosbi.free`, `org.yonosbi.app`, `io.yonosbi.app` |
 
 - Lure words for the default language are in `config/phrases.yaml` under `default.lure_suffixes`. Localized lure words come from the markets of the storefronts in settings.
-- Keywords from the request (`keywords`) are added as well. None were sent for SBI.
+- The brand's `keywords` (set on the brand record) are added as well. The SBI run had none.
 - Homoglyph and typo variants are built from the brand name only, not from aliases.
 
 ---
@@ -466,7 +480,7 @@ The report is `data/results/<scan_id>/output.json`. The latest SBI scan is `scn_
 | Field | Type | Meaning |
 |---|---|---|
 | `scan_id` | string | `scn_` followed by a ULID |
-| `query` | object | The request as the API received it, plus `analyze_apks` and `received_at`. Brand data merged from the stored brand is not here. |
+| `query` | object | The request as the API received it, plus `received_at`. Brand data merged from the stored brand is not here. |
 | `summary` | object | Counts (below) |
 | `results` | array of Hit | Hits to review |
 | `allowlisted` | array of AllowlistedItem | Hits cleared by the allowlist |
@@ -479,26 +493,9 @@ The report is `data/results/<scan_id>/output.json`. The latest SBI scan is `scn_
 
 ### `query`
 
-Every field of the submitted request body is kept (defaults included), and the scanner adds two fields:
-
-| Field | Type | Source |
-|---|---|---|
-| `brand_name` | string | Request |
-| `brand_id` | string or null | Request |
-| `brand_aliases` | array of string | Request |
-| `android_packages` | array of string | Request |
-| `ios_bundles` | array of string | Request |
-| `official_domain` | string or null | Request |
-| `official_domains` | array of string | Request |
-| `official_publishers` | array of string | Request |
-| `play_developer_ids` | array of string | Request |
-| `app_store_seller_ids` | array of string | Request |
-| `allowlist_packages` | array of string | Request |
-| `keywords` | array of string | Request |
-| `analyze_apks` | boolean | Settings (not a request field) |
-| `received_at` | string (ISO 8601) | Set when the scan starts |
-
-Fields that are not sent show their defaults. A brand scan sends only `brand_id`, so `official_domains` and the id lists show what was sent on that request.
+The body as the API received it, plus `received_at`. A scan request takes only `brand_name`, so `query` is that one
+field and the time the scan was accepted. The fields merged in from the brand record are in the scan's behaviour, not
+in `query`.
 
 ### `summary`
 
@@ -647,7 +644,7 @@ Do not wrap `run.py restart` in `timeout`. The timeout kills the processes it st
 **Storage**
 
 - **Elasticsearch is optional, and its failures are silent.** Indexing failures are logged as warnings in the report, and the scan still completes. Results are then only in `output.json` and are not searchable. In the latest run the warning was present because Elasticsearch was not running.
-- **Brands need Elasticsearch.** A scan with a `brand_id` returns 503 when Elasticsearch cannot be reached. A scan that sends the ids in its body does not need it.
+- **Brands need Elasticsearch.** A scan by brand name returns 503 when Elasticsearch cannot be reached, because the brand's ids and aliases are read from it. A name with no stored brand still runs, but as a name-only scan.
 
 **Scope**
 
@@ -710,7 +707,7 @@ The labels are a judgement made from the names and packages. They are not checke
 .venv312/bin/python -m pytest tests/unit -q -p no:cacheprovider --ignore tests/unit/test_csv_injection.py --ignore tests/unit/test_url_tools.py
 ```
 
-Latest run: 271 passed, 26 failed. The 26 failures test features that were removed (`callback_url`, `depth`, keyword validation, older rate-limiter and adapter internals). Two test files were excluded because they import functions that no longer exist: `test_csv_injection.py` and `test_url_tools.py`.
+Latest run: 304 passed, 26 failed. The 26 failures are in older test files that call functions and attributes no longer in the code (`ScanReport.sources`, `_get_redis`, `webhook_actor`, `default_country_list`, `progress_cb`, `callback_url`, `depth`, older rate-limiter and adapter internals). Two test files were excluded because they import functions that no longer exist: `test_csv_injection.py` and `test_url_tools.py`.
 
 `tests/integration/` calls `status_store` functions that no longer exist (`get_dedup`, `add_to_running`, `get_progress`). Those tests fail and are not part of the run above.
 
@@ -733,6 +730,5 @@ Known findings: four unused imports in `tests/conftest.py`.
 | Reading the brand's store links | `app/services/discovery.py` (`listed_app`) |
 | Source and scan time limits | `SOURCE_TIMEOUT_SECONDS`, `SCAN_TIMEOUT_SECONDS` |
 | Allowlist rule | `app/services/allowlist.py` |
-| Request fields | `app/api/models.py` |
-# find-same-app
-# find-same-app
+| Request fields | `app/api/models.py` (`ScanCreate` for the scan body, `ScanRequest` for the merged request) |
+| Brand record fields and rules | `app/api/routes/brand_details.py` (request rules), `app/storage/brand_index.py` (storage and merge) |

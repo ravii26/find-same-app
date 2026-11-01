@@ -127,12 +127,6 @@ async def test_unreadable_listing_is_a_discovery_error(monkeypatch):
         await discovery.discover([PLAY], [], "YONO SBI", aliases=[], cc="in")
 
 
-# ── brand ids ──────────────────────────────────────────────────────────────────
-
-def test_invalid_brand_id_is_refused():
-    assert not brand_index.valid_brand_id("../etc/passwd")
-    assert not brand_index.valid_brand_id("brd_short")
-    assert brand_index.valid_brand_id("brd_01HZX0000000000000000000AB")
 
 
 # ── developer page: browser scroll, static fallback ───────────────────────────

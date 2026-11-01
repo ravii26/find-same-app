@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from ulid import ULID
 
 from app.api.middleware.auth import require_api_key
-from app.api.models import ScanRequest, ScanStatus
+from app.api.models import ScanCreate, ScanRequest, ScanStatus
 from app.config.settings import get_settings
 from app.jobs.actors import promote_pending
 from app.services import discovery
@@ -73,7 +73,7 @@ async def _own_apps(details: dict) -> list[dict[str, str]]:
 
 @router.post("/scans", status_code=status.HTTP_202_ACCEPTED, response_model=None)
 async def create_scan(
-    body: ScanRequest,
+    payload: ScanCreate,
     request: Request,
     _: Annotated[str, Depends(require_api_key)],
 ):
@@ -81,15 +81,17 @@ async def create_scan(
     running returns that scan instead of starting a second one."""
     settings = get_settings()
     redis = _redis(request)
-    submitted = body.model_dump(mode="json", exclude={"submitted"})
+    submitted = payload.model_dump(mode="json")
+    body = ScanRequest(brand_name=payload.brand_name)
 
-    if body.brand_id:
-        try:
-            details = await brand_index.read(body.brand_id)
-        except brand_index.BrandNotFound as exc:
-            raise HTTPException(status_code=404, detail="brand not found") from exc
-        except brand_index.BrandIndexUnavailable as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+    # The brand's stored record is read by name. A name with no stored brand is a name-only scan.
+    try:
+        details = await brand_index.read(payload.brand_name)
+    except brand_index.BrandNotFound:
+        details = None
+    except brand_index.BrandIndexUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if details:
         own_apps = await _own_apps(details)
         body = brand_index.merge_into_request(body, details, own_apps)
     body = body.model_copy(update={"submitted": submitted})

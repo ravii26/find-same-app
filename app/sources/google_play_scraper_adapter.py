@@ -191,6 +191,7 @@ class GooglePlayScraperAdapter(SourceAdapter):
                 version=r.get("version") or None,
                 publisher=r.get("developer"),
                 icon_url=r.get("icon") or None,
+                description=(r.get("description") or "")[:1000] or None,
                 url=url,
                 is_official_match=is_official,
                 host=HostInfo(

@@ -70,6 +70,8 @@ class _State:
     stage: str = "collecting"
     # (name, method) of every source the scan started, so one that never finished is still reported
     sources: list[tuple[str, SourceMethod]] = field(default_factory=list)
+    # (domain, listing field) of the brand's domains read from its Google Play listing for this scan
+    derived_domains: list[tuple[str, str]] = field(default_factory=list)
 
 
 async def run_scan(scan_id: str, request: ScanRequest, redis_client: aioredis.Redis) -> ScanReport:
@@ -211,6 +213,7 @@ def _build_report(scan_id: str, st: _State, error: str | None, duration_ms: int)
         warnings=st.warnings,
         expanded_keywords=st.expanded_keywords,
         source_statuses=st.statuses,
+        derived_official_domains=[{"domain": d, "from": f} for d, f in st.derived_domains],
         error=error,
     )
 
@@ -352,11 +355,33 @@ async def _pipeline(scan_id: str, request: ScanRequest, redis_client: aioredis.R
             _note(scan_id, "INFO", f"official Play developer id '{developer_id}' read from the listing of {request.android_package}")
     st.request = request  # with what was learned, so a scan that stops early still allowlists with it
 
+    # The brand's own Play listing gives its icon (the reference for icon comparison; the listing itself is
+    # allowlisted, so it is not among the hits) and the domains the developer publishes. Those domains are used for
+    # this scan only; the brand record is not changed.
+    official_icon_url: str | None = None
+    if request.android_package:
+        try:
+            from app.services.play_listing import fetch_listing, listing_domains, listing_icon
+            listing = await fetch_listing(request.android_package, settings.default_country_list())
+            official_icon_url = listing_icon(listing)
+            st.derived_domains = listing_domains(listing)
+        except Exception as exc:
+            warn(f"Official listing read failed: {exc}")
+    derived = [domain for domain, _ in st.derived_domains if domain not in request.official_domains]
+    if derived:
+        request = request.model_copy(update={
+            "official_domains": [*request.official_domains, *derived],
+            "official_domain": request.official_domain or derived[0],
+        })
+        _note(scan_id, "INFO", f"official domains read from the Google Play listing: {', '.join(derived)}")
+    st.request = request
+
     ctx = ScanContext(
         scan_id=scan_id,
         request=request,
         expanded_keywords=keywords,
         official_permissions=official_permissions,
+        official_icon_url=official_icon_url,
     )
 
     await status_store.update_meta_field(redis_client, scan_id, phase="collecting")
@@ -457,6 +482,7 @@ async def _pipeline(scan_id: str, request: ScanRequest, redis_client: aioredis.R
     below_threshold: list[Hit] = []
     scored = await score_hits(
         deduped, request, official_permissions=ctx.official_permissions, icon_cache=icon_cache,
+        reference_icon_url=ctx.official_icon_url,
         official_publishers=publishers, dropped=below_threshold,
     )
     await status_store.set_progress(redis_client, scan_id, 95)
