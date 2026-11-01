@@ -1,7 +1,7 @@
 # config/scoring.yaml
 # Scoring ruleset — weights and thresholds for relevance scoring.
 # Increment ruleset_version whenever weights or signals change.
-ruleset_version: "v11"
+ruleset_version: "v12"
 
 weights:
   # Name / title similarity (rapidfuzz ratio on homoglyph-folded strings)
@@ -57,3 +57,9 @@ signals:
   fuzzy_brand_cap: 59
   # Approximate match corroborated by only two fields (name + package): low confidence
   fuzzy_weak_brand_cap: 44
+  # The official app id on a third-party site without the brand's publisher: most likely a mirror of the real app.
+  # Kept for review (the signing certificate is not checked) but ranked under high_risk.
+  unverified_official_copy_cap: 55
+  # A code repository that names itself the brand's APK, or a fake/clone of it ("Fake-PhonePe-APK"): raised to this
+  # score (high risk). Repos that only mention the brand are not raised.
+  brand_repo_floor: 70

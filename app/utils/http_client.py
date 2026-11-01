@@ -232,6 +232,42 @@ async def _acquire_slot() -> None:
         await asyncio.sleep(0.05)
 
 
+# A host we cannot connect to at all (DNS answer refused, connection refused, no route, firewall timeout) will not
+# come back within seconds: such errors get one retry, not http_retries. After _UNREACHABLE_AFTER whole fetches to
+# the same host failed that way, further fetches to it fail at once for _UNREACHABLE_TTL seconds. Without this, a
+# source that is unreachable from this network spends ~30 s on every one of its queries and can use up the whole scan.
+_UNREACHABLE_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.ProxyError)
+_UNREACHABLE_RETRIES = 1
+_UNREACHABLE_AFTER = 2
+_UNREACHABLE_TTL = 300.0
+
+
+def _unreachable_hosts() -> dict[str, tuple[int, float, str]]:
+    """host -> (failed fetches, monotonic time of the last one, last error), per thread and event loop."""
+    loop = asyncio.get_running_loop()
+    if getattr(_tl, "unreachable_loop", None) is not loop:
+        _tl.unreachable_loop = loop
+        _tl.unreachable = {}
+    return _tl.unreachable
+
+
+def _skip_reason(host: str) -> str | None:
+    """Why fetches to this host are skipped right now, or None."""
+    entry = _unreachable_hosts().get(host)
+    if not entry:
+        return None
+    count, last, error = entry
+    if count >= _UNREACHABLE_AFTER and time.monotonic() - last < _UNREACHABLE_TTL:
+        return f"{host} is unreachable ({count} fetches could not connect; last error: {error}); not tried again"
+    return None
+
+
+def _mark_unreachable(host: str, exc: Exception) -> None:
+    hosts = _unreachable_hosts()
+    count = hosts.get(host, (0, 0.0, ""))[0]
+    hosts[host] = (count + 1, time.monotonic(), f"{type(exc).__name__}: {exc}"[:200])
+
+
 _BLOCKED_STATUS = re.compile(r"Status code (403|429|5\d\d) returned")
 
 
@@ -352,18 +388,27 @@ async def fetch(
     cap = max_bytes or settings.max_response_bytes
     client = await get_client()
 
+    host = (urlparse(url).hostname or "").lower()
+    skip = _skip_reason(host)
+    if skip:
+        raise FetchError(skip)
+
     # Per-domain rate limit, shared across all concurrent scans via Redis (see throttle()).
     await throttle(url)
 
     last_exc: Exception = RuntimeError("no attempts made")
     for attempt in range(retries + 1):
+        if isinstance(last_exc, _UNREACHABLE_ERRORS) and attempt > _UNREACHABLE_RETRIES:
+            break  # could not connect at all: more attempts only burn the scan's time
         try:
             # A slot is held only for the request itself, never while sleeping between attempts
             await _acquire_slot()
             try:
-                return await _get_once(client, url, method, data, merged_headers, follow_redirects, timeout, cap)
+                resp = await _get_once(client, url, method, data, merged_headers, follow_redirects, timeout, cap)
             finally:
                 _request_slots().release()
+            _unreachable_hosts().pop(host, None)
+            return resp
         except (BlockedError, FetchError):
             raise
         except SSRFError as exc:  # a redirect hop (or rebinding answer) pointed somewhere forbidden
@@ -376,12 +421,16 @@ async def fetch(
                 await asyncio.sleep(min(delay, _MAX_RETRY_AFTER) + random.uniform(0, 0.5))
         except (httpx.TimeoutException, httpx.TransportError, httpx.HTTPStatusError) as exc:
             last_exc = exc
-            if attempt < retries:
+            gives_up = isinstance(exc, _UNREACHABLE_ERRORS) and attempt >= _UNREACHABLE_RETRIES
+            if attempt < retries and not gives_up:
                 delay = backoff_base * (2 ** attempt) + random.uniform(0, 0.5)
                 await asyncio.sleep(delay)
 
     if isinstance(last_exc, _ThrottledError):
         raise BlockedError(str(last_exc)) from last_exc
+    if isinstance(last_exc, _UNREACHABLE_ERRORS):
+        _mark_unreachable(host, last_exc)
+        raise FetchError(f"Could not connect to {host} for {url}: {type(last_exc).__name__}: {last_exc}") from last_exc
     raise FetchError(f"All {retries + 1} attempts failed for {url}: {last_exc}") from last_exc
 
 

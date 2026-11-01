@@ -146,8 +146,11 @@ def _score_one(
             score += signals["package_id_suffix_variation"]
             reasons.append("package ID has suffix variation of official ID")
 
-    # Domain similarity — rapidfuzz + TLD checks
-    official_reg = registrable_domain(official_domain) if official_domain else None
+    # Domain similarity — rapidfuzz + TLD checks. Skipped for a listing on a store or APK site: its URL is the
+    # store's domain, not the app's ("phonepeappstore.com" is PhonePe's own store, not a lookalike of phonepe.com).
+    official_reg = (
+        registrable_domain(official_domain) if official_domain and hit_host_group not in _STORE_GROUPS else None
+    )
     if official_reg:
         hit_reg = registrable_domain(hit_url)
         hit_decoded = decode_idn(hit_reg)
@@ -482,6 +485,13 @@ async def _enrich_permission_similarity(
 
 # A store or mirror listing must show evidence beyond its name before it is reported. Unrelated apps that share a
 # brand's common word ("Bob") carry only the name, and that is what floods the report.
+# Host groups whose URLs belong to a store, not to the app listed on it
+_STORE_GROUPS = frozenset({"app_store", "official_store", "apk_site", "code_host"})
+
+# A code repository that ships the brand's APK, or calls itself a fake or clone of it ("Fake-PhonePe-APK")
+_REPO_BAIT_RE = re.compile(r"\b(apk|apks|xapk)\b", re.IGNORECASE)
+_SHORT_BRAND = 5  # compact length at or under which a brand is too common a word to match on "apk" alone
+
 _ICON_MATCH = 0.80   # same pHash level that earns the icon bonus
 _APP_ID_MATCH = 0.85
 # Aliases this short ("BOB") are also everyday words and names, so an app named after one claims nothing
@@ -494,12 +504,20 @@ def _claims_the_brand(hit: Hit, request: ScanRequest) -> bool:
     name, so their publisher, app id and icon are their own and the other evidence never fires for them.
     "Bob World: Super Bro Run Game" only contains the brand and claims neither."""
     name = hit.app_name or hit.title
-    if hit.type != HitType.app_listing or not name:
+    if hit.type not in (HitType.app_listing, HitType.repo) or not name:
         return False
     brands = [request.brand_name, *(a for a in request.brand_aliases if len(compact(a)) >= _MIN_ALIAS_LEN)]
-    if any(is_brand_name(b, name) for b in brands):
+    if hit.type == HitType.app_listing and any(is_brand_name(b, name) for b in brands):
         return True
-    return bool(_BAIT_RE.search(name) or _SCAM_RE.search(name)) and any(exact_in(b, name) for b in brands)
+    # Repo names join words with - and _ ("PhonepeCashback_apk"): split them so word matching works
+    words = re.sub(r"[-_.]+", " ", name)
+    bait = _BAIT_RE.search(words) or _SCAM_RE.search(words)
+    if hit.type == HitType.repo and not bait:
+        # "apk" in a repo name ties it to the brand only for a distinctive brand: a short common word ("Bob")
+        # turns up in repo names by accident ("apk-bob-assistant")
+        distinctive = [b for b in brands if len(compact(b)) > _SHORT_BRAND]
+        return bool(_REPO_BAIT_RE.search(words)) and any(exact_in(b, name) for b in distinctive)
+    return bool(bait) and any(exact_in(b, name) for b in brands)
 
 
 def _has_evidence_beyond_name(hit: Hit, request: ScanRequest, official_publishers: set[str] | frozenset[str]) -> bool:
@@ -508,6 +526,11 @@ def _has_evidence_beyond_name(hit: Hit, request: ScanRequest, official_publisher
     from app.services.allowlist import _norm_publisher
 
     if hit.is_official_match or _claims_the_brand(hit, request):
+        return True
+    # "PhonePay" by "PhonePay Co" as com.phonepay.android: a near-spelling of the brand carried through every field
+    # is a lookalike on purpose, not a coincidence (one coincidental field gives only a weak match)
+    brands = [request.brand_name, *request.brand_aliases]
+    if presence_any(brands, hit.app_name or hit.title, hit.package_id, hit.publisher) == "fuzzy":
         return True
     if hit.publisher and _norm_publisher(hit.publisher) in official_publishers:
         return True
@@ -521,6 +544,54 @@ def _has_evidence_beyond_name(hit: Hit, request: ScanRequest, official_publisher
         return True
     official_domains = {registrable_domain(d) for d in [request.official_domain, *request.official_domains] if d}
     return bool(official_domains and registrable_domain(hit.url) in official_domains)
+
+
+def _cap_official_copy(hit: Hit, request: ScanRequest, official_publishers: set[str] | frozenset[str]) -> Hit:
+    """The brand's own app id on a third-party site, not under the brand's publisher: most likely a mirror of the real
+    app. Its signing certificate is not checked, so it is not cleared, but it ranks under high risk with that reason.
+
+    Applied after the icon and permission bonuses: a mirror carries the official icon, which would otherwise lift it
+    straight back to the top.
+    """
+    from app.services.allowlist import _norm_publisher, _platform
+
+    pkg = (hit.package_id or "").strip().lower()
+    if not pkg or hit.is_official_match or (hit.host and hit.host.is_official_store):
+        return hit
+    if pkg not in request.official_app_ids()[_platform(hit)]:
+        return hit
+    if hit.publisher and _norm_publisher(hit.publisher) in official_publishers:
+        return hit  # the allowlist decides these
+    cap = int(_load_config()["signals"].get("unverified_official_copy_cap", 55))
+    if hit.relevance_score <= cap:
+        return hit
+    return hit.model_copy(update={
+        "relevance_score": cap,
+        "reasons": hit.reasons + [
+            f"same app id as the official app ({hit.package_id}) on a third-party site: most likely a mirror of the "
+            "real app; its signing certificate is not checked, so it is kept for review"
+        ],
+    })
+
+
+def _raise_brand_repo(hit: Hit, request: ScanRequest) -> Hit:
+    """A code repository that presents itself as the brand's APK, or as a fake or clone of it ("Fake-PhonePe-APK",
+    "phonepe-sound-box-working-apk"), is distributing or building an impersonation: ranked as high risk.
+
+    Name similarity alone keeps such repos in "review": a repo has no package id, publisher or icon to add points. A
+    repo that only mentions the brand ("phonepe-notes") does not claim it and keeps its score.
+    """
+    if hit.type != HitType.repo or not _claims_the_brand(hit, request):
+        return hit
+    floor = int(_load_config()["signals"].get("brand_repo_floor", high_risk_threshold()))
+    if hit.relevance_score >= floor:
+        return hit
+    return hit.model_copy(update={
+        "relevance_score": floor,
+        "reasons": hit.reasons + [
+            "code repository presents itself as the brand's APK or as a fake or clone of it: ranked as high risk"
+        ],
+    })
 
 
 def _gate_name_only(hit: Hit, request: ScanRequest, official_publishers: set[str] | frozenset[str]) -> Hit:
@@ -563,7 +634,9 @@ async def score_hits(
         scored, request.brand_name, icon_cache=icon_cache, reference_icon_url=reference_icon_url,
     )
 
+    scored = [_cap_official_copy(h, request, official_publishers) for h in scored]
     scored = [_gate_name_only(h, request, official_publishers) for h in scored]
+    scored = [_raise_brand_repo(h, request) for h in scored]
 
     filtered = [h for h in scored if h.relevance_score >= min_relevance_for(h)]
     if dropped is not None:

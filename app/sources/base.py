@@ -89,6 +89,12 @@ def is_network_block(error: str) -> bool:
     return bool(_NETWORK_BLOCK_RE.search(error))
 
 
+def note_page_error(exc: Exception, errors: list[str], blocked: list[str]) -> None:
+    """Record why a page could not be loaded: unreachable/refused goes to `blocked`, anything else to `errors`."""
+    message = f"{type(exc).__name__}: {str(exc).splitlines()[0][:160] if str(exc) else ''}"
+    (blocked if is_network_block(str(exc)) else errors).append(message)
+
+
 def scrape_status(
     name: str, method: SourceMethod, hits: list[Hit], *, errors: list[str], blocked: list[str],
 ) -> SourceStatus:

@@ -29,7 +29,7 @@ The API queues each scan. A Dramatiq worker runs it. Redis holds the queue and l
 **What it does**
 
 - Reads the brand's store accounts (Google Play developer, App Store seller) from the brand's own store links.
-- Searches 25 sources for apps and pages that use the brand name, aliases or lure words.
+- Searches 23 sources for apps and pages that use the brand name, aliases or lure words.
 - Scores every hit, clears the apps the brand's accounts publish and the ids the brand declares, and reports what is left.
 
 **What it does not do**
@@ -53,7 +53,7 @@ flowchart LR
     A -->|enqueue| R[(Redis: queues, status, progress)]
     R -->|consume| W[Dramatiq worker]
     A -->|brand details| B[(Elasticsearch: rogue-brands)]
-    W -->|scans queue| S[Scan: 25 sources, scoring, allowlist]
+    W -->|scans queue| S[Scan: 23 sources, scoring, allowlist]
     S -->|report| F[(data/results/scn_id/output.json)]
     S -.->|optional| E[(Elasticsearch: scans, hits)]
 ```
@@ -207,7 +207,7 @@ Response, 202:
 Each step runs in the worker, in `app/services/orchestrator.py`.
 
 1. **Keyword expansion.** Search terms are built from the brand name and aliases (see [section 8](#8-keyword-expansion)). The SBI run had 48 terms.
-2. **Sources.** All 25 sources run in parallel. Each one returns hits and a status (`ok`, `failed`, `blocked` or `skipped`).
+2. **Sources.** All 23 sources run in parallel. Each one returns hits and a status (`ok`, `failed`, `blocked` or `skipped`).
 3. **Deduplication.** Hits with the same URL are merged. Each hit keeps every query and source that found it.
 4. **Store accounts.** Google Play hits that show a brand publisher name have their listing read for the developer id (see [section 6](#6-allowlist)).
 5. **Allowlist.** A hit published by one of the brand's store accounts, or matching a declared publisher and one of the brand's ids on the same platform, is moved to `allowlisted` with a reason (see [section 6](#6-allowlist)).
@@ -438,7 +438,7 @@ domain sbi.bank.in is an official domain
 
 ## 7. Sources
 
-25 adapters are registered in `app/sources/registry.py`. Method is `API` (a documented JSON or RSS endpoint) or `scrape` (HTML or a site's search page).
+23 adapters are registered in `app/sources/registry.py`. APKCombo and HappyMod were removed in Nov 2026: both domains no longer exist (NXDOMAIN). Method is `API` (a documented JSON or RSS endpoint) or `scrape` (HTML or a site's search page).
 
 Status in the table is from the latest SBI scan (`scn_01M68BXR0V087DGN1HREJXE7XW`). It can change from run to run.
 
@@ -447,7 +447,7 @@ Status in the table is from the latest SBI scan (`scn_01M68BXR0V087DGN1HREJXE7XW
 | 1 | Apple App Store (`itunes`) | official store | API | Search terms, and seller lookup by `artistId` | `trackName`, `bundleId`, `artistName`, `trackViewUrl`, `artworkUrl60` | 200 results per query. Seller lookup lists all software of the seller. | ok, 405 results |
 | 2 | Google Play (`google_play`) | official store | scrape (library) | Search terms, and package details | `appId`, `title`, `developer`, `icon` | Search returns about 12 to 15 results per storefront. Some apps are missing from some storefronts. | ok, 43 results |
 | 3 | GetApps / Xiaomi (`getapps`) | official store | API | Search terms, per storefront | Name, package, publisher, icon | Storefront-specific results | ok, 38 results |
-| 4 | Samsung Galaxy Store (`samsung_galaxy`) | official store | scrape (browser) | Search terms, per storefront | Name, URL, icon | Browser-rendered, slow | ok, 10 results |
+| 4 | Samsung Galaxy Store (`samsung_galaxy`) | official store | API (the store's own `/storeserver/search`, XML) | Search terms | Name, package, publisher, icon | Results come from the store's default region | ok, 16 results (PhonePe) |
 | 5 | Huawei AppGallery (`huawei_appgallery`) | official store | scrape (browser) | Search terms | Name, URL, icon | Browser-rendered | ok, 0 results |
 | 6 | Indus Appstore / PhonePe (`indus_appstore`) | official store | scrape (browser) | Search terms | Name, package, URL | Results are PhonePe's catalogue | ok, 10 results |
 | 7 | TapTap (`taptap`) | third-party store | scrape | Search terms | Name, URL, icon | Global storefront only | ok, 0 results |
@@ -455,13 +455,13 @@ Status in the table is from the latest SBI scan (`scn_01M68BXR0V087DGN1HREJXE7XW
 | 9 | Aptoide (`aptoide`) | APK site | API | Search terms | Name, package, publisher, URL | 36 results per scan | ok, 36 results |
 | 10 | APKPure (`apkpure`) | APK site | scrape | Search terms | Name, URL | Returns HTTP 403 | blocked, 0 results |
 | 11 | APKMirror (`apkmirror`) | APK site | RSS feed | Search terms | Name, URL | Feed may return 403 | ok, 0 results |
-| 12 | APKCombo (`apkcombo`) | APK site | scrape (browser) | Search terms | Name, URL | DNS fails from the test machine | failed, DNS |
+| 12 | APKCombo (`apkcombo`) | APK site | — | — | — | Removed: apkcombo.com no longer exists | removed |
 | 13 | APKFab (`apkfab`) | APK site | scrape (browser) | Search terms | Name, URL | Returns HTTP 403 | blocked, 403 |
 | 14 | APK4Fun (`apk4fun`) | APK site | scrape (browser) | Search terms | Name, URL | Browser-rendered | ok, 0 results |
 | 15 | APKKit (`apkkit`) | APK site | scrape (browser) | Search terms | Name, URL | Browser-rendered | ok, 1 result |
 | 16 | APKBoat (`apkboat`) | APK site | scrape | Search terms | Name, URL | Plain HTTP | ok, 0 results |
 | 17 | Softonic (`softonic`) | APK site | scrape | Search terms | Name, per-app subdomain URL | Returns HTTP 406 at times | blocked, 406 |
-| 18 | HappyMod (`happymod`) | APK site | scrape (browser) | Search terms | Name, URL | DNS fails from the test machine | failed, DNS |
+| 18 | HappyMod (`happymod`) | APK site | — | — | — | Removed: happymod.com no longer exists | removed |
 | 19 | Uptodown (`uptodown`) | APK site | scrape (browser) | Search terms | Name, URL | Browser-rendered | ok, 27 results |
 | 20 | Bing (`bing`) | web search | scrape (browser) | Search templates, per storefront market | URL, title, snippet | Results vary between runs. Market changes results. | ok, 42 results |
 | 21 | DuckDuckGo (`duckduckgo`) | web search | scrape (browser) | Search terms | URL, title, snippet | CAPTCHA when the IP is blocked | blocked, CAPTCHA |
@@ -532,7 +532,7 @@ in `query`.
 |---|---|---|
 | `total_results` | integer | Length of `results` |
 | `by_source_group` | object | Results per group (`official_store`, `app_store`, `apk_site`, `web_search`, `social`, `domains`, `code_host`) |
-| `sources_total` | integer | Sources registered (25) |
+| `sources_total` | integer | Sources registered (23) |
 | `sources_ok` | integer | Sources with status `ok` |
 | `sources_failed` | integer | Sources with status `failed` or `blocked` |
 | `sources_skipped` | integer | Sources not run |
@@ -626,6 +626,7 @@ Settings come from environment variables (or `.env`, which is not read by this R
 | `MAX_QUEUE_DEPTH` | `100` | Queued plus running scans before the API returns 429 |
 | `EMBEDDED_WORKER` | `true` | The API starts its own worker. Set to `false` when a separate worker runs. |
 | `SCAN_TIMEOUT_SECONDS` | `600` | Scan time limit |
+| `SOURCE_TIMEOUT_SECONDS` | `240` | Time limit for one source. A source that runs longer is stopped and reported as `failed`. |
 | `ANALYZE_APKS` | `false` | Downloads and analyses APKs. Off. |
 | `CAPTURE_EVIDENCE` | `false` | Captures page screenshots and HTML |
 | `ELASTICSEARCH_URL` | `http://localhost:9200` | Optional. If unreachable, indexing fails and the report is still written. |

@@ -12,7 +12,6 @@ from app.utils.rate_limiter import RateLimiter
 @pytest.mark.parametrize("url, rps", [
     ("https://en.softonic.com/s/paytm", 1),
     ("https://www.apkmirror.com/feed/", 1),
-    ("https://apkcombo.com/search/x/", 1),
     ("https://appgallery.huawei.com/search", 1),
     ("https://global.app.mi.com/search", 2),
     ("https://www.phonepeappstore.com/search/", 1),

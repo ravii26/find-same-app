@@ -18,7 +18,14 @@ from app.api.models import (
     SourceMethod,
     SourceStatus,
 )
-from app.sources.base import SourceAdapter, embedded_package, scraped_hit
+from app.sources.base import (
+    SourceAdapter,
+    embedded_package,
+    note_page_error,
+    page_problem,
+    scrape_status,
+    scraped_hit,
+)
 from app.utils.browser import browser_context
 from app.utils.http_client import throttle
 
@@ -42,6 +49,8 @@ class UptodownAdapter(SourceAdapter):
 
         hits: list[Hit] = []
         seen_pkgs: set[str] = set()
+        errors: list[str] = []
+        blocked: list[str] = []
 
         try:
             async with browser_context() as bctx:
@@ -53,13 +62,18 @@ class UptodownAdapter(SourceAdapter):
                     page = await bctx.new_page()
                     try:
                         await throttle(search_url)
-                        await page.goto(search_url, wait_until="networkidle", timeout=30000)
+                        resp = await page.goto(search_url, wait_until="networkidle", timeout=30000)
+                        problem = page_problem(resp.status if resp else None, await page.title())
+                        if problem:
+                            blocked.append(f"{problem} from en.uptodown.com")
+                            continue
                         for a in await page.query_selector_all("a[href*='.en.uptodown.com/android']"):
                             href = await a.get_attribute("href") or ""
                             if href and href not in app_urls:
                                 app_urls.append(href)
                     except Exception as e:
                         log.warning("uptodown: search page parse failed for term %r: %s", term, e)
+                        note_page_error(e, errors, blocked)
                     finally:
                         await page.close()
 
@@ -113,6 +127,7 @@ class UptodownAdapter(SourceAdapter):
                             ))
                         except Exception as e:
                             log.warning("uptodown: app page parse failed for %r: %s", app_url, e)
+                            note_page_error(e, errors, blocked)
                         finally:
                             await app_page.close()
 
@@ -124,6 +139,5 @@ class UptodownAdapter(SourceAdapter):
                 error=f"Playwright error: {exc}",
             )
 
-        return hits, SourceStatus(
-            name=self.name, method=self.method, status="ok", results=len(hits)
-        )
+        # A page that never loaded is not "no results": report it as blocked/failed (or partial with some hits)
+        return hits, scrape_status(self.name, self.method, hits, errors=errors, blocked=blocked)
