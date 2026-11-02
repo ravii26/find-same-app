@@ -33,7 +33,6 @@ def test_missing_brand_name_is_refused():
     ("official_publishers", ["Bank of Baroda"]),
     ("allowlist_packages", ["com.example.app"]),
     ("play_developer_ids", ["123"]),
-    ("app_store_seller_ids", ["456"]),
     ("keywords", ["login"]),
     ("countries", ["IN"]),
 ])

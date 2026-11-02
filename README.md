@@ -188,7 +188,6 @@ stored record. A brand is found by its name, in any case.
 | App Store ids behind the brand's links | `ios_bundles` |
 | Publisher names of those apps | `official_publishers` |
 | Developer ids of those Play apps | `play_developer_ids` |
-| Seller ids (`artistId`) of those App Store apps | `app_store_seller_ids` |
 | Aliases | `brand_aliases` |
 | Keywords | `keywords` |
 | Official domains | `official_domains` (added to the ones you send) |
@@ -212,7 +211,7 @@ Each step runs in the worker, in `app/services/orchestrator.py`.
 4. **Store accounts.** Google Play hits that show a brand publisher name have their listing read for the developer id (see [section 6](#6-allowlist)).
 5. **Allowlist.** A hit published by one of the brand's store accounts, or matching a declared publisher and one of the brand's ids on the same platform, is moved to `allowlisted` with a reason (see [section 6](#6-allowlist)).
 6. **Scoring.** Each hit is scored from 0 to 100 (see [section 5](#5-scoring)).
-7. **Threshold.** Hits under 35 are moved to `suppressed`. Hits from social and web-search sources need 40.
+7. **Threshold.** Hits under 35 are moved to `suppressed`. Hits from channel and search-engine sources need 40.
 8. **Classification.** Scores of 70 and up are high risk. Hits from 35 to 69 are for review.
 9. **Report.** The report is written to `data/results/<scan_id>/output.json`. If Elasticsearch is configured, the scan and hits are also indexed there. Indexing failures are logged as warnings and do not fail the scan.
 
@@ -377,8 +376,6 @@ A weight multiplies a similarity between 0 and 1, then by 100. For example, a pa
 | `tld_swap` | +4 | Same name, different TLD |
 | `icon_phash_similar` | +10 | Icon similarity 0.80 or more (pHash) |
 | `icon_phash_identical` | +20 | Icon similarity 0.95 or more |
-| `permission_similarity_medium` | +8 | Permission overlap 0.60 or more with the official app (APK analysis only) |
-| `repackaged_apk_bonus` | +15 | Permission overlap 0.85 or more and a certificate mismatch |
 | `companion_app_penalty` | −15 | Utility or companion app for the brand (for example a status saver) |
 
 ### Caps
@@ -409,7 +406,7 @@ This drops apps that only share a common brand word: for "bob World", "Bob World
 
 | Band | Score | Meaning |
 |---|---|---|
-| Suppressed | below 35 (below 40 for social and web search) | Not reported as a result. Kept in `suppressed` with the reason. |
+| Suppressed | below 35 (below 40 for channels and search engines) | Not reported as a result. Kept in `suppressed` with the reason. |
 | Review | 35 to 69 | Reported as a result for review |
 | High risk | 70 and up | Reported as a result, flagged high risk |
 
@@ -443,10 +440,11 @@ This was a false positive. It is one of the brand's own apps, but the customer h
 
 ### The rule
 
-**Store account.** A hit on Google Play or the App Store is allowlisted when the store says one of the brand's accounts publishes it:
+**App Store artist id (first).** An App Store hit is allowlisted when its `artistId` equals the `artistId` of the App Store URL the caller gave. Only App Store hits are checked by this rule.
 
-- Google Play: the listing's developer id is in `play_developer_ids`.
-- App Store: the listing's seller id (`artistId`) is in `app_store_seller_ids`.
+**Package and publisher (second).** A hit is allowlisted when its package id and publisher match its own store's listing: the Play package and developer name for Google Play, the bundle and seller name for the App Store. Each store is compared only with its own listing.
+
+**Play developer id (third).** A Google Play hit is allowlisted when its developer id is in `play_developer_ids`.
 
 The store issues these ids, and only the account owner can publish under one. So every app the brand's account publishes is cleared, including sibling apps nobody listed and apps the brand publishes later. A copy that uses the same publisher *name* under another account is not cleared. The ids come only from Google Play and the App Store, never from a third-party site.
 
@@ -455,15 +453,14 @@ Where the account ids come from:
 | Id | Source |
 |---|---|
 | `play_developer_ids` | The Play listing behind each of the brand's Play links (read at scan time), and the listing of `android_packages[0]` |
-| `app_store_seller_ids` | The App Store listing behind each of the brand's App Store links, and any App Store hit whose bundle id is one of `ios_bundles` |
-| Both | Can also be sent in the scan request |
+| App Store `artistId` | The `artistId` of the App Store listing for `ios_bundles[0]`, read at scan time. Not stored in the brand record. |
 
 Play search results show the developer name but not the id. Each Play hit that shows a brand publisher name is looked up on its listing to read the id (3 at a time, across the configured storefronts). Play hits under other publisher names are not looked up, because an account shows one name on all its apps.
 
 Any other app hit is allowlisted only when **both** are true:
 
 1. **Publisher.** The hit's publisher matches a declared publisher (`official_publishers`, which includes the publishers of the brand's own links). Matching ignores case, punctuation and company suffixes (`Pvt`, `Ltd`, `Inc`).
-2. **Package.** The hit's package id is one of the brand's ids on the **same platform** (`android_packages`, `ios_bundles`), or is in `allowlist_packages`.
+2. **Package.** On Google Play, the hit's package id is the brand's Play package (`android_packages[0]`) and its publisher is the developer name on that Play listing. On the App Store, the bundle is `ios_bundles[0]` and the publisher is the seller name on that listing. Each store is checked only against its own listing.
 
 A web hit is also allowlisted, on its own, when its registrable domain is in `official_domain` or `official_domains`.
 
@@ -494,7 +491,6 @@ domain sbi.bank.in is an official domain
 
 | Setting | Use |
 |---|---|
-| `allowlist_packages` | Other ids the brand owns, for example a business app. Still needs a publisher match. |
 | `official_publishers` | Publisher names. The publishers of the brand's own links are added automatically. |
 | `official_domains` | Other registrable domains owned by the brand. |
 
@@ -532,7 +528,7 @@ Status in the table is from the latest SBI scan (`scn_01M68BXR0V087DGN1HREJXE7XW
 | 22 | Lookalike domains (`lookalike_domains`) | domains | scrape | Generated domains from the official domain | Domain, page assessment | Needs `official_domain`. Only domains that resolve are reported. | ok, 0 results |
 | 23 | GitHub (`github`) | code host | API | Search terms with `apk` | Repository name, URL | Rate limits without a token | ok, 0 results |
 | 24 | GitLab (`gitlab`) | code host | API | Search terms | Repository name, URL | Rate limits without a token | ok, 0 results |
-| 25 | Telegram (`telegram`) | social | scrape | Search terms through a public index, then public channel pages | Channel post text, links | Public channels only | ok, 0 results |
+| 25 | Telegram (`telegram`) | channel | scrape | Search terms through a public index, then public channel pages | Channel post text, links | Public channels only | ok, 0 results |
 
 **Status key:** `ok` the source answered. `failed` an error (DNS, timeout, or parsing). `blocked` refused or challenged (HTTP 403 or 406, or a CAPTCHA). `skipped` not run (for example, Lookalike domains needs `official_domain`).
 
@@ -553,12 +549,11 @@ Keywords are built from the brand name and the aliases before the sources run. T
 | `original` | 3 | Brand name and its parts | `YONO SBI`, `YONO`, `SBI` |
 | `variant` | 3 | Spacing and joining variants | `yono-sbi`, `yono_sbi`, `yonosbi` |
 | `package` | 1 | Lower-case package-style token | `lotusintouch` (from `com.sbi.lotusintouch`) |
-| `lure` | 24 | Brand plus a lure word, from the default phrases and the localized packs | `YONO SBI apk`, `YONO SBI mod apk`, `YONO SBI free download`, `YONO SBI cracked`, `YONO SBI loan app`, `YONO SBI تحميل`, `YONO SBI مهكر` |
+| `lure` | 13 | Brand plus an English lure word, from `default.lure_suffixes` | `YONO SBI apk`, `YONO SBI mod apk`, `YONO SBI free download`, `YONO SBI cracked`, `YONO SBI hack` |
 | `typo` | 5 | Dropped or swapped letters | `ono sbi`, `yano sbi`, `oyno sbi`, `yyono sbi`, `tono sbi` |
 | `homoglyph` | 5 | Look-alike Unicode characters | `yоno sbi` (Cyrillic о), `yóno sbi`, `yoиo sbi`, `yonо sbi`, `yonó sbi` |
-| `package_guess` | 7 | Package ids guessed from the brand, for code and APK search | `com.yonosbi.app`, `com.yonosbi.billing`, `com.yonosbi.pro`, `com.yonosbi.lite`, `com.yonosbi.free`, `org.yonosbi.app`, `io.yonosbi.app` |
 
-- Lure words for the default language are in `config/phrases.yaml` under `default.lure_suffixes`. Localized lure words come from the markets of the storefronts in settings.
+- Lure words are English only, from `default.lure_suffixes` in `config/phrases.yaml`. Localized packs add scoring words, not search terms.
 - The brand's `keywords` (set on the brand record) are added as well. The SBI run had none.
 - Homoglyph and typo variants are built from the brand name only, not from aliases.
 
@@ -595,7 +590,7 @@ in `query`.
 | Field | Type | Meaning |
 |---|---|---|
 | `total_results` | integer | Length of `results` |
-| `by_source_group` | object | Results per group (`official_store`, `app_store`, `apk_site`, `web_search`, `social`, `domains`, `code_host`) |
+| `by_source_group` | object | Results per group (`app_store`, `apk_site`, `code_host`, `channel`, `search_engine`, `lookalike_domain`) |
 | `sources_total` | integer | Sources registered (23) |
 | `sources_ok` | integer | Sources with status `ok` |
 | `sources_failed` | integer | Sources with status `failed` or `blocked` |
@@ -627,7 +622,6 @@ in `query`.
 | `reasons` | array of string | Why the score is what it is |
 | `is_official_match` | boolean | Hit is an official listing |
 | `icon_similarity` | number or null | pHash similarity to the official icon |
-| `permission_similarity` | number or null | Permission overlap (APK analysis only) |
 | `apk_analysis` | object or null | APK analysis result (only when `analyze_apks` is on) |
 | `evidence` | object or null | Captured page details (only when `capture_evidence` is on) |
 | `discovered_at` | string (ISO 8601) | When the hit was found |
@@ -670,7 +664,7 @@ Elasticsearch indexing failed; the results are in the scan report only, not sear
 | Field | Type | Meaning |
 |---|---|---|
 | `term` | string | Search term |
-| `type` | string | `original`, `variant`, `package`, `lure`, `typo`, `homoglyph`, `package_guess` |
+| `type` | string | `original`, `variant`, `package`, `lure`, `typo`, `homoglyph`, `phonetic` |
 | `reason` | string | Why the term was added |
 
 ---
@@ -692,7 +686,7 @@ Settings come from environment variables (or `.env`, which is not read by this R
 | `SCAN_TIMEOUT_SECONDS` | `600` | Scan time limit |
 | `SOURCE_TIMEOUT_SECONDS` | `240` | Time limit for one source. A source that runs longer is stopped and reported as `failed`. |
 | `ANALYZE_APKS` | `false` | Downloads and analyses APKs. Off. |
-| `CAPTURE_EVIDENCE` | `false` | Captures page screenshots and HTML |
+| `CAPTURE_EVIDENCE` | `false` | Captures a page screenshot. The capture details are in the hit's `evidence` in `output.json` |
 | `ELASTICSEARCH_URL` | `http://localhost:9200` | Optional. If unreachable, indexing fails and the report is still written. |
 | `ELASTICSEARCH_INDEX_PREFIX` | `rogue` | Index names: `rogue-scans`, `rogue-hits` |
 | `GITHUB_TOKEN`, `GITLAB_TOKEN` | empty | Raise the rate limits of the code-host sources |
@@ -731,9 +725,8 @@ Do not wrap `run.py restart` in `timeout`. The timeout kills the processes it st
 - **Sources fail or are blocked.** In the latest run, six of the 25 sources failed or were blocked: APKPure (403), APKFab (403), Softonic (406), APKCombo (DNS), HappyMod (DNS) and DuckDuckGo (CAPTCHA). Their results are missing from that scan. A `blocked` or `failed` status does not mean the brand has no listings there.
 - **Web search varies.** Bing and DuckDuckGo return different results from run to run. The SBI run had 10 Bing results in one scan and 49 in another. Counts in `suppressed` change for that reason.
 - **Scan time grows with the storefront list.** Each storefront adds Play, App Store and Bing requests. The latest SBI scan took about 90 to 130 seconds with five storefronts.
-- **A slow source is stopped.** Each source gets `SOURCE_TIMEOUT_SECONDS` (240) and is then reported as `failed`. A scan that reaches `SCAN_TIMEOUT_SECONDS` (600) is `failed`, but what it collected is still allowlisted and scored, without the icon and permission checks.
-- **Scoring compares one Android id for APK checks.** Certificate and permission checks use the first Android id of the brand, because they need one official app to compare against. The package and allowlist checks use all of them.
-- **`allowlist_packages` is not split by platform.** It applies to both stores.
+- **A slow source is stopped.** Each source gets `SOURCE_TIMEOUT_SECONDS` (240) and is then reported as `failed`. A scan that reaches `SCAN_TIMEOUT_SECONDS` (600) is `failed`, but what it collected is still allowlisted and scored, without the icon check.
+- **Scoring compares one Android id for APK checks.** Certificate checks use the first Android id of the brand, because they need one official app to compare against. The package and allowlist checks use all of them.
 
 **Storage**
 

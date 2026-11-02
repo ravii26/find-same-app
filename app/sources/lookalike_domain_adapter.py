@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import datetime
-import hashlib
 import logging
 import re
 import socket
@@ -224,7 +223,6 @@ async def _probe(
             captured_at=datetime.datetime.now(datetime.UTC),
             http_status=resp.status_code,
             final_url=page_url,
-            page_sha256=hashlib.sha256(resp.content).hexdigest(),
             assessment=kind,
         )
         return (title[:150] or None), registrable_domain(page_url).lower(), apk_url, check

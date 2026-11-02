@@ -158,7 +158,6 @@ class HuaweiAdapter(SourceAdapter):
             url=url,
             host_name="Huawei AppGallery",
             host_domain="appgallery.huawei.com",
-            is_official_store=True,
             hit_id=uid,
             title=name,
             app_name=name,

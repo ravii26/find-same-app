@@ -6,13 +6,13 @@ import datetime
 
 from app.api.models import FoundVia, Hit, HitType, HostInfo, ScanRequest, SourceMethod
 from app.services import orchestrator
-from app.services.allowlist import split_allowlisted
+from app.services.allowlist import split_allowlisted, store_metadata
 from app.services.deduplicator import group_mirrors
 from app.services.scoring import _score_one
 from app.storage import brand_index
 
 PLAY = HostInfo(group="app_store", name="Google Play", domain="play.google.com", is_official_store=True)
-APPLE = HostInfo(group="official_store", name="Apple App Store", domain="apps.apple.com", is_official_store=True)
+APPLE = HostInfo(group="app_store", name="Apple App Store", domain="apps.apple.com", is_official_store=True)
 MIRROR = HostInfo(group="apk_site", name="Aptoide", domain="aptoide.com")
 
 
@@ -26,6 +26,9 @@ def _hit(pkg: str, host: HostInfo, *, publisher="State Bank of India", developer
     )
 
 
+PLAY_META = store_metadata([("com.sbi.lotusintouch", "State Bank of India", "State+Bank+of+India")])
+
+
 def _request(**kw) -> ScanRequest:
     return ScanRequest(brand_name="YONO SBI", android_packages=["com.sbi.lotusintouch"],
                        official_publishers=["State Bank of India"], **kw)
@@ -35,33 +38,70 @@ def _request(**kw) -> ScanRequest:
 
 def test_unconfirmed_sibling_on_play_is_allowlisted_by_its_developer_account():
     hit = _hit("com.YONODEMobileApp", PLAY, developer_id="State+Bank+of+India")
-    remaining, allowed = split_allowlisted([hit], _request(play_developer_ids=["State+Bank+of+India"]))
+    remaining, allowed = split_allowlisted([hit], _request(), store_meta=PLAY_META)
     assert remaining == []
     assert "account State+Bank+of+India" in allowed[0].reason
 
 
 def test_copy_with_the_brand_name_but_another_account_is_not_allowlisted():
     hit = _hit("com.YONODEMobileApp", PLAY, developer_id="Someone+Else")
-    remaining, _ = split_allowlisted([hit], _request(play_developer_ids=["State+Bank+of+India"]))
+    remaining, _ = split_allowlisted([hit], _request(), store_meta=PLAY_META)
     assert remaining == [hit]
 
 
 def test_developer_id_on_a_third_party_site_does_not_count():
     hit = _hit("com.YONODEMobileApp", MIRROR, developer_id="State+Bank+of+India")
-    remaining, _ = split_allowlisted([hit], _request(play_developer_ids=["State+Bank+of+India"]))
+    remaining, _ = split_allowlisted([hit], _request(), store_meta=PLAY_META)
     assert remaining == [hit]
 
 
 def test_a_play_developer_id_does_not_count_on_the_app_store():
     hit = _hit("com.YONODEMobileApp", APPLE, developer_id="State+Bank+of+India")
-    remaining, _ = split_allowlisted([hit], _request(play_developer_ids=["State+Bank+of+India"]))
+    remaining, _ = split_allowlisted([hit], _request(), store_meta=PLAY_META)
     assert remaining == [hit]
 
 
-def test_app_store_seller_id_allowlists_the_sellers_apps():
+def test_app_store_artist_id_from_the_given_url_allowlists_the_sellers_apps():
     hit = _hit("com.YONOOMMobileApp", APPLE, developer_id="503784436")
-    remaining, allowed = split_allowlisted([hit], _request(app_store_seller_ids=["503784436"]))
-    assert remaining == [] and allowed
+    meta = store_metadata(app_store_listings=[("com.sbi.YONOBD", "State Bank of India", "503784436")])
+    remaining, allowed = split_allowlisted([hit], _request(), store_meta=meta)
+    assert remaining == [] and "account" in allowed[0].reason
+
+
+def test_app_store_artist_id_is_not_taken_from_other_hits():
+    # The official listing is the one the caller's URL gives; another hit's artist id does not clear anything
+    hit = _hit("com.YONOOMMobileApp", APPLE, developer_id="503784436")
+    remaining, _ = split_allowlisted([hit], _request(), store_meta=store_metadata(app_store_listings=[("com.sbi.YONOBD", "SBI", None)]))
+    assert remaining == [hit]
+
+
+def test_two_app_store_apps_from_different_publishers_match_their_own_publisher():
+    meta = store_metadata(app_store_listings=[
+        ("com.bank.one", "Bank One Ltd", "111"),
+        ("com.shop.two", "Shop Two Pvt", "222"),
+    ])
+    own = _hit("com.bank.one", APPLE, publisher="Bank One Ltd")
+    wrong_publisher = _hit("com.bank.one", APPLE, publisher="Shop Two Pvt")
+    remaining, allowed = split_allowlisted([own, wrong_publisher], _request(), store_meta=meta)
+    assert remaining == [wrong_publisher] and allowed[0].package_id == "com.bank.one"
+
+
+def test_both_app_store_artist_ids_are_kept():
+    meta = store_metadata(app_store_listings=[
+        ("com.bank.one", "Bank One Ltd", "111"),
+        ("com.shop.two", "Shop Two Pvt", "222"),
+    ])
+    assert meta["apps.apple.com"]["seller_ids"] == {"111", "222"}
+
+
+def test_two_play_apps_from_different_developers_each_match_their_own_developer():
+    meta = store_metadata([("com.bank.one", "Bank One Ltd", "111"), ("com.shop.two", "Shop Two Pvt", "222")])
+    assert meta["play.google.com"]["seller_ids"] == {"111", "222"}
+    by_id = _hit("com.YONOAA", PLAY, publisher="Shop Two Pvt", developer_id="222")  # second listing's developer id
+    by_pkg = _hit("com.shop.two", PLAY, publisher="Shop Two Pvt")                   # second listing's package + publisher
+    wrong = _hit("com.bank.one", PLAY, publisher="Shop Two Pvt")                    # first package, second publisher
+    remaining, allowed = split_allowlisted([by_id, by_pkg, wrong], _request(), store_meta=meta)
+    assert remaining == [wrong] and len(allowed) == 2
 
 
 # ── where the account ids come from ───────────────────────────────────────────
@@ -75,15 +115,6 @@ def test_merge_takes_accounts_from_the_brands_own_links_only():
     ]
     merged = brand_index.merge_into_request(ScanRequest(brand_name="YONO SBI"), doc, own)
     assert merged.play_developer_ids == ["State+Bank+of+India"]
-    assert merged.app_store_seller_ids == ["503784436"]
-
-
-def test_seller_of_the_official_app_store_listing_is_learned():
-    hits = [
-        _hit("com.sbi.YONOBD", APPLE, developer_id="503784436", official=True),
-        _hit("com.clone", APPLE, developer_id="999"),
-    ]
-    assert orchestrator._learn_app_store_sellers(_request(), hits).app_store_seller_ids == ["503784436"]
 
 
 async def test_only_play_hits_showing_a_brand_publisher_are_looked_up(monkeypatch):
@@ -212,8 +243,10 @@ async def test_timed_out_scan_reports_scored_results_not_raw_hits(monkeypatch):
         await asyncio.sleep(3600)
 
     monkeypatch.setattr(get_settings(), "scan_timeout_seconds", 1)
-    request = ScanRequest(brand_name="YONO SBI", ios_bundles=["com.sbi.YONOBD"], app_store_seller_ids=["503784436"])
-    with patch("app.services.orchestrator.get_all_adapters",
+    request = ScanRequest(brand_name="YONO SBI", ios_bundles=["com.sbi.YONOBD"])
+    listing = {"icon": None, "publisher": "State Bank of India", "seller_id": "503784436"}
+    with patch("app.sources.itunes.app_store_listing", AsyncMock(return_value=listing)), \
+         patch("app.services.orchestrator.get_all_adapters",
                return_value=[adapter("store", answers), adapter("hangs", hangs)]), \
          patch("app.services.orchestrator.status_store") as ss:
         ss.update_meta_field = ss.set_progress = ss.update_sources = AsyncMock()

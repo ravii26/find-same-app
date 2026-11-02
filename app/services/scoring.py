@@ -233,7 +233,7 @@ def _score_one(
 
     # Brand-presence caps. No brand match at all: generic apps that merely share a word
     # can't score high. Only an approximate (lookalike-spelling) match: ranked below
-    # exact matches unless other evidence (icon, cert, permissions) lifts it.
+    # exact matches unless other evidence (icon, cert) lifts it.
     if match is None:
         cap = signals.get("no_brand_presence_cap", 34)
         if score > cap:
@@ -392,101 +392,10 @@ async def _enrich_phash(
     return list(enriched)
 
 
-async def _enrich_permission_similarity(
-    hits: list[Hit],
-    official_permissions: list[str],
-    brand_name: str = "",
-    official_package: str | None = None,
-) -> list[Hit]:
-    """Fetch candidate permissions from Play Store and apply two signals:
-      1. Excess dangerous permissions — rogue requests dangerous perms the official doesn't
-      2. Permission Jaccard — overall overlap with the official app's permissions
-
-    Only runs when official_permissions is non-empty.
-    Uses google_play_scraper.permissions() — no APK download required.
-    """
-    if not official_permissions:
-        return hits
-
-    from app.services.play_listing import (
-        android_excess_dangerous as excess_dangerous,
-    )
-    from app.services.play_listing import (
-        android_permission_jaccard as permission_jaccard,
-    )
-    from app.services.play_listing import (
-        fetch_permissions,
-    )
-
-    cfg = _load_config()
-    signals = cfg["signals"]
-
-    async def _enrich_one(hit: Hit) -> Hit:
-        if hit.is_official_match or not hit.package_id:
-            return hit
-
-        # The official package itself (a copy on a mirror) has the official permissions by definition:
-        # identical permissions are no evidence against it.
-        if official_package and hit.package_id.lower() == official_package.lower():
-            return hit
-
-        # Skip permission bonuses for any brand-absent hit.
-        # The score-cap reason is only added when raw score > 35, so hits that
-        # naturally score below 35 (but could be pushed above by permission
-        # bonuses) are not caught by a reason-string check — re-derive directly.
-        if brand_name and presence(brand_name, hit.app_name, hit.package_id, hit.publisher) is None:
-            return hit
-
-        # Only enrich hits where we have an exact package ID to look up on Play Store
-        if not (hit.host and hit.host.domain in (
-            "play.google.com", "aptoide.com", "global.app.mi.com",
-            "appgallery.huawei.com",
-        )):
-            return hit
-
-        candidate_perms = await fetch_permissions(hit.package_id)
-        if not candidate_perms:
-            return hit
-
-        sim = permission_jaccard(official_permissions, candidate_perms)
-        excess = excess_dangerous(official_permissions, candidate_perms)
-        new_reasons = list(hit.reasons)
-        bonus = 0
-
-        # Signal 1 — excess dangerous permissions (from s8_sort.py logic)
-        if excess:
-            pts = min(10, len(excess) * 2)
-            bonus += pts
-            new_reasons.append(
-                f"requests {len(excess)} dangerous permission(s) the official app does not: "
-                + ", ".join(excess[:5])
-            )
-
-        # Signal 2 — Jaccard similarity. Identical permissions alone are not evidence of a copy, so no points.
-        if sim >= 0.85:
-            new_reasons.append(
-                f"permission set {sim:.0%} matches official app (no points on their own)"
-            )
-        elif sim >= 0.60:
-            bonus += signals.get("permission_similarity_medium", 8)
-            new_reasons.append(f"permission set {sim:.0%} overlaps with official app")
-
-        if bonus == 0 and not excess and sim < 0.60:
-            return hit
-
-        return hit.model_copy(update={
-            "permission_similarity": sim,
-            "relevance_score": min(100, hit.relevance_score + bonus),
-            "reasons": new_reasons,
-        })
-
-    return list(await asyncio.gather(*[_enrich_one(h) for h in hits]))
-
-
 # A store or mirror listing must show evidence beyond its name before it is reported. Unrelated apps that share a
 # brand's common word ("Bob") carry only the name, and that is what floods the report.
 # Host groups whose URLs belong to a store, not to the app listed on it
-_STORE_GROUPS = frozenset({"app_store", "official_store", "apk_site", "code_host"})
+_STORE_GROUPS = frozenset({"app_store", "apk_site", "code_host"})
 
 # A code repository that ships the brand's APK, or calls itself a fake or clone of it ("Fake-PhonePe-APK")
 _REPO_BAIT_RE = re.compile(r"\b(apk|apks|xapk)\b", re.IGNORECASE)
@@ -635,24 +544,17 @@ def _gate_name_only(hit: Hit, request: ScanRequest, official_publishers: set[str
 async def score_hits(
     hits: list[Hit],
     request: ScanRequest,
-    official_permissions: list[str] | None = None,
     icon_cache: dict[str, str] | None = None,
     official_publishers: set[str] | frozenset[str] = frozenset(),
     dropped: list[Hit] | None = None,
     reference_icon_url: str | None = None,
 ) -> list[Hit]:
-    """Score all hits concurrently, enrich with permission similarity + pHash,
+    """Score all hits concurrently, enrich with pHash,
     return sorted by score desc. Hits under the reporting threshold are appended to `dropped` when given,
     so the caller can count them instead of losing them silently. reference_icon_url is the brand's own icon, for
     icon comparison when its listing is not among the hits."""
     tasks = [score_hit(h, request, official_publishers) for h in hits]
     scored = list(await asyncio.gather(*tasks))
-
-    # Permission similarity enrichment (official permissions read from Google Play)
-    if official_permissions:
-        scored = await _enrich_permission_similarity(
-            scored, official_permissions, request.brand_name, official_package=request.android_package,
-        )
 
     # pHash enrichment — uses pre-populated cache from parallel prefetch if available
     scored = await _enrich_phash(
@@ -671,7 +573,7 @@ async def score_hits(
 
 
 # Social and web-search hits are noisy: they need a higher score to surface
-_NOISY_GROUPS = frozenset({"social", "web_search"})
+_NOISY_GROUPS = frozenset({"channel", "search_engine"})
 
 
 def min_relevance_for(hit: Hit) -> int:

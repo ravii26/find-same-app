@@ -3,10 +3,6 @@
 
 For each selected hit, stores under DATA_DIR/results/{scan_id}/evidence/{hit_id}/:
   - page.png       full-page screenshot (only when CAPTURE_EVIDENCE is enabled)
-  - meta.json      URL, final URL and redirects, capture time, HTTP status, SHA-256 of the page and the
-                   screenshot, the score and reasons: what a takedown request needs
-  - page.html.gz   the raw page, compressed, only for high-risk hits and up to _HTML_CAP_BYTES
-  - icon.<type>    the listing's icon, named by the image type found in its bytes
 
 The page check (parked / blank / brand bait) does not depend on this: discovery runs it and keeps the result
 on the hit. Only listing pages are fetched, never download URLs. Capture is best-effort: a failure is recorded
@@ -17,16 +13,13 @@ from __future__ import annotations
 
 import asyncio
 import datetime
-import gzip
 import hashlib
-import json
 import logging
 from pathlib import Path
 
 from app.api.models import EvidenceRecord, Hit
 from app.config.settings import get_settings
 from app.services.page_assessment import assess_page
-from app.services.scoring import high_risk_threshold
 from app.utils.browser import browser_context
 from app.utils.http_client import FetchError, fetch, is_blocked_message
 from app.utils.ssrf_guard import SSRFError, check_url
@@ -36,36 +29,10 @@ log = logging.getLogger(__name__)
 
 _SCREENSHOT_TIMEOUT_MS = 20_000  # page load
 _SCREENSHOT_SECONDS = 60  # whole screenshot, browser start-up included
-_HTML_CAP_BYTES = 2 * 1024 * 1024
-
-_IMAGE_TYPES = (
-    (b"\x89PNG", "png"),
-    (b"\xff\xd8\xff", "jpg"),
-    (b"GIF8", "gif"),
-    (b"\x00\x00\x01\x00", "ico"),
-)
 
 
 def evidence_dir(scan_id: str, hit_id: str) -> Path:
     return get_settings().scan_result_dir(scan_id) / "evidence" / hit_id
-
-
-def _image_type(data: bytes) -> str:
-    """File type from the bytes, not the server's content-type, so the icon opens directly."""
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "webp"
-    for magic, ext in _IMAGE_TYPES:
-        if data.startswith(magic):
-            return ext
-    if data.lstrip()[:5].lower() in (b"<?xml", b"<svg "):
-        return "svg"
-    return "bin"
-
-
-def _keep_html(hit: Hit, record: EvidenceRecord, page: bytes) -> bool:
-    """The raw page is kept only for the hits that matter in a takedown, and only when it is small enough."""
-    risky = hit.relevance_score >= high_risk_threshold() or record.assessment == "brand_bait"
-    return risky and len(page) <= _HTML_CAP_BYTES
 
 
 async def _guard_request(route) -> None:
@@ -135,7 +102,6 @@ async def _capture_page(
         "http_status": resp.status_code,
         "final_url": str(resp.request.url),
         "redirects": [str(r.url) for r in getattr(resp, "history", [])],
-        "page_sha256": hashlib.sha256(page).hexdigest(),
     })
     # The check from discovery is kept; it is only worked out here when discovery did not have it
     if record.assessment is None and brand and hit.host and hit.host.group == "lookalike_domain":
@@ -143,28 +109,7 @@ async def _capture_page(
             record = record.model_copy(update={"assessment": assess_page(page, brand, official_domain)})
         except Exception as exc:  # a parser quirk must never lose the captured evidence
             log.warning("evidence: assessment failed for %s: %s", hit.url, exc)
-    if _keep_html(hit, record, page):
-        try:
-            (out / "page.html.gz").write_bytes(gzip.compress(page))
-            record = record.model_copy(update={"page_path": "page.html.gz"})
-        except OSError as exc:
-            log.warning("evidence: could not write page for %s: %s", hit.id, exc)
     return record
-
-
-async def _capture_icon(out: Path, url: str, record: EvidenceRecord) -> EvidenceRecord:
-    try:
-        icon = (await fetch(url, rotate_ua=True)).content
-    except Exception as exc:
-        log.warning("evidence: icon fetch failed for %s: %s", url, exc)
-        return record
-    name = f"icon.{_image_type(icon)}"
-    try:
-        (out / name).write_bytes(icon)
-    except OSError as exc:
-        log.warning("evidence: could not write icon for %s: %s", url, exc)
-        return record
-    return record.model_copy(update={"icon_path": name, "icon_sha256": hashlib.sha256(icon).hexdigest()})
 
 
 async def capture_hit(
@@ -192,9 +137,6 @@ async def capture_hit(
     else:
         record = await _capture_page(out, hit, record, brand, official_domain)
 
-    if hit.icon_url:
-        record = await _capture_icon(out, hit.icon_url, record)
-
     if shot_reason is None:
         shot_reason = await _screenshot(hit.url, out / "page.png")
     if shot_reason is None:
@@ -205,15 +147,6 @@ async def capture_hit(
     else:
         record = record.model_copy(update={"screenshot_error": shot_reason})
 
-    meta = {
-        "scan_id": scan_id,
-        "hit": json.loads(hit.model_dump_json()),
-        "evidence": json.loads(record.model_dump_json()),
-    }
-    try:
-        (out / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
-    except OSError as exc:
-        log.warning("evidence: could not write meta for %s: %s", hit.id, exc)
     return record
 
 

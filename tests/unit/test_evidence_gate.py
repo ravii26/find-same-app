@@ -20,7 +20,7 @@ def _listing(**update) -> Hit:
     base = dict(
         id="1", type=HitType.app_listing, title="Bob HR", app_name="Bob HR", package_id="com.hibob",
         publisher="Hi Bob Ltd", url="https://play.google.com/store/apps/details?id=com.hibob",
-        host=HostInfo(group="official_store", name="Google Play", domain="play.google.com", is_official_store=True),
+        host=HostInfo(group="app_store", name="Google Play", domain="play.google.com", is_official_store=True),
         discovered_at=datetime.datetime.now(datetime.UTC), relevance_score=65,
     )
     return Hit(**{**base, **update})
@@ -62,7 +62,7 @@ def test_official_domain_counts_as_evidence():
 
 
 def test_web_pages_are_not_gated():
-    web = _listing(type=HitType.web_page, host=HostInfo(group="web_search", name="Bing", domain="bing.com"))
+    web = _listing(type=HitType.web_page, host=HostInfo(group="search_engine", name="Bing", domain="bing.com"))
     assert not _gated(web)
 
 

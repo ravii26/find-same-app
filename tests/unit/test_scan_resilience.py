@@ -169,6 +169,17 @@ async def test_lookalike_domain_that_offers_an_apk_is_reported():
     assert all(h.apk_url == "https://phonepe-apk.com/phonepe.apk" and h.discovered_at for h in hits)
 
 
+async def test_lookalike_domain_without_an_apk_link_is_not_reported():
+    """A domain that resolves and looks like the brand, but offers no APK file, is not a mobile app finding."""
+    from app.api.models import EvidenceRecord
+    from app.sources import lookalike_domain_adapter as mod
+    check = EvidenceRecord(captured_at=datetime.datetime.now(datetime.UTC), http_status=200, assessment="brand_bait")
+    probe = AsyncMock(return_value=("PhonePe login", "phonepe-kyc.com", None, check))
+    with patch.object(mod, "_resolves", AsyncMock(return_value=True)), patch.object(mod, "_probe", probe):
+        hits, status = await mod.LookalikeDomainAdapter().search(_ctx(official_domain="phonepe.com"))
+    assert status.status == "ok" and hits == [] and status.results == 0
+
+
 # ── 2. An unreachable host is not retried for the rest of the scan ────────────
 
 

@@ -46,10 +46,6 @@ signals:
   # pHash icon similarity vs official app icon
   icon_phash_similar: 10               # similarity >= 0.80
   icon_phash_identical: 20             # similarity >= 0.95 (near-pixel-perfect clone)
-  # Permission similarity vs official app (auto-fetched from Play Store via android_package)
-  # Jaccard >= 0.85 adds no points on its own (a shared permission list alone is not a copy)
-  permission_similarity_medium: 8      # Jaccard >= 0.60 — significant overlap
-  # excess_dangerous: min(10, count * 2) — computed inline, not a fixed signal
   # Brand-absent cap: hits with no brand token in name/package/publisher are capped here.
   # Must be one below min_relevance so capped hits are automatically excluded.
   no_brand_presence_cap: 34

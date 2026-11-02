@@ -91,8 +91,6 @@ class GitLabAdapter(SourceAdapter):
                 path_slug = item.get("path") or ""
                 repo_name = item.get("name") or ""
                 # Repos whose path/name contain "apk" are APK distribution repos
-                is_apk_repo = "apk" in path_slug.lower() or "apk" in repo_name.lower()
-                group = "apk_site" if is_apk_repo else self.host_group
 
                 hits.append(
                     scraped_hit(
@@ -101,7 +99,7 @@ class GitLabAdapter(SourceAdapter):
                         url=repo_url,
                         host_name="GitLab",
                         host_domain="gitlab.com",
-                        group=group,
+                        group=self.host_group,
                         hit_id=uid,
                         hit_type=HitType.repo,
                         title=repo_name,

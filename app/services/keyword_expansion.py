@@ -3,13 +3,11 @@
 Keyword expansion — generates deduplicated, ranked search terms from the
 canonical scan request.
 
-Types: original, variant, package, lure, typo, homoglyph, phonetic,
-       package_guess.
+Types: original, variant, package, lure, typo, homoglyph, phonetic.
 """
 
 from __future__ import annotations
 
-import re
 import unicodedata
 
 from app.api.models import Keyword, KeywordType, ScanRequest
@@ -148,25 +146,12 @@ def _phonetic_variants(term: str) -> list[str]:
     return list(variants)[:3]
 
 
-def _package_guesses(brand: str) -> list[str]:
-    b = re.sub(r"[^a-z0-9]", "", brand.lower())
-    return [
-        f"com.{b}.app",
-        f"com.{b}.billing",
-        f"com.{b}.pro",
-        f"com.{b}.lite",
-        f"com.{b}.free",
-        f"org.{b}.app",
-        f"io.{b}.app",
-    ]
-
-
 def expand(request: ScanRequest) -> list[Keyword]:
     """
     Produce deduplicated, ranked keyword list from the scan request.
 
     Order of precedence: original > variant > package > lure >
-                         typo > homoglyph > phonetic > package_guess.
+                         typo > homoglyph > phonetic.
     Total capped at MAX_KEYWORDS.
     """
     seen: set[str] = set()
@@ -202,7 +187,7 @@ def expand(request: ScanRequest) -> list[Keyword]:
 
     # Lure terms — brand name only, not caller-supplied keywords. English first, then the phrases of the
     # markets of the storefronts every scan searches (config/phrases.yaml).
-    for suffix in phrases.lure_suffixes(get_settings().default_country_list()):
+    for suffix in phrases.lure_suffixes():
         add(f"{brand} {suffix}", KeywordType.lure, f"APK distribution lure ({suffix})")
 
     # Typos — brand name only
@@ -216,10 +201,6 @@ def expand(request: ScanRequest) -> list[Keyword]:
     # Phonetic — brand name only
     for v in _phonetic_variants(brand):
         add(v, KeywordType.phonetic, f"Phonetic variant of '{brand}'")
-
-    # Package guesses
-    for v in _package_guesses(brand):
-        add(v, KeywordType.package_guess, f"Package ID guess for '{brand}'")
 
     max_kw = get_settings().max_keywords
     return results[:max_kw]

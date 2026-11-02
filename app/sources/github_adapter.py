@@ -78,8 +78,6 @@ class GitHubAdapter(SourceAdapter):
                 seen.add(uid)
                 repo_name = item.get("name") or ""
                 full_name = item.get("full_name") or ""
-                is_apk_repo = "apk" in repo_name.lower()
-                group = "apk_site" if is_apk_repo else self.host_group
                 hits.append(
                     scraped_hit(
                         self,
@@ -87,7 +85,7 @@ class GitHubAdapter(SourceAdapter):
                         url=repo_url,
                         host_name="GitHub",
                         host_domain="github.com",
-                        group=group,
+                        group=self.host_group,
                         hit_id=uid,
                         hit_type=HitType.repo,
                         title=full_name,

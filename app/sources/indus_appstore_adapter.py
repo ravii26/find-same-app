@@ -27,8 +27,8 @@ from app.api.models import (
     SourceMethod,
     SourceStatus,
 )
-from app.services.keyword_expansion import fold_homoglyphs
-from app.sources.base import SourceAdapter, brand_words, pkg_queries, scrape_status, scraped_hit
+from app.services.brand_match import presence_any
+from app.sources.base import SourceAdapter, pkg_queries, scrape_status, scraped_hit
 from app.utils.browser import browser_context, page_html
 from app.utils.http_client import FetchError, throttle
 
@@ -47,6 +47,15 @@ _DEVELOPER_RE = re.compile(r'"developerDisplayName":\[0,"((?:[^"\\]|\\.)*)"\]')
 def _developer_from_detail(page_html: str) -> str | None:
     m = _DEVELOPER_RE.search(html.unescape(page_html))
     return html.unescape(m.group(1)).strip() or None if m else None
+
+
+def _description_from_detail(page_html: str) -> str | None:
+    """The app's description: the text of the "About the app" block (full text is in the page; CSS clamps it)."""
+    node = HTMLParser(page_html).css_first('[data-post-type="APP_INFO"] div.whitespace-pre-line')
+    if node is None:
+        return None
+    text = node.text(separator="\n").strip()
+    return text[:1000] or None  # same cap as the iTunes and Google Play descriptions
 
 
 def parse_search_results(page_html: str) -> list[dict]:
@@ -97,7 +106,7 @@ class IndusAppstoreAdapter(SourceAdapter):
 
     async def search(self, ctx: ScanContext) -> tuple[list[Hit], SourceStatus]:
         brand = ctx.request.brand_name
-        brand_tokens = brand_words(brand)
+        brands = [brand, *ctx.request.brand_aliases]
 
         hits: list[Hit] = []
         seen: set[str] = set()
@@ -117,26 +126,21 @@ class IndusAppstoreAdapter(SourceAdapter):
 
                     matched: list[dict] = []
                     for card in cards:
-                        name_lower = fold_homoglyphs(card["name"]).lower()
-                        pkg_lower = card["package_id"].lower()
-                        if brand_tokens and not (
-                            any(tok in name_lower for tok in brand_tokens)
-                            or any(tok in pkg_lower for tok in brand_tokens)
-                        ):
-                            continue
+                        if presence_any(brands, card["name"], card["package_id"], None) is None:
+                            continue  # not the brand, nor a near-miss spelling of it
                         uid = hashlib.sha256(card["url"].encode()).hexdigest()[:32]
                         if uid in seen:
                             continue
                         seen.add(uid)
                         matched.append({**card, "uid": uid})
 
-                    publishers = await asyncio.gather(
+                    details = await asyncio.gather(
                         *(
-                            self._fetch_publisher(bctx, c["url"])
+                            self._fetch_detail(bctx, c["url"])
                             for c in matched[: self.max_results]
                         )
                     )
-                    for card, publisher in zip(matched, publishers, strict=False):
+                    for card, (publisher, description) in zip(matched, details, strict=False):
                         hits.append(
                             scraped_hit(
                                 self,
@@ -148,6 +152,7 @@ class IndusAppstoreAdapter(SourceAdapter):
                                 app_name=card["name"],
                                 package_id=card["package_id"],
                                 publisher=publisher,
+                                description=description,
                                 icon_url=card["icon_url"],
                             )
                         )
@@ -159,10 +164,12 @@ class IndusAppstoreAdapter(SourceAdapter):
         return hits, scrape_status(self.name, self.method, hits, errors=errors, blocked=[])
 
     @staticmethod
-    async def _fetch_publisher(context, url: str) -> str | None:
+    async def _fetch_detail(context, url: str) -> tuple[str | None, str | None]:
+        """(developer, description) from the app's detail page; (None, None) when it cannot be read."""
         try:
             await throttle(url)
-            return _developer_from_detail(await page_html(context, url))
+            page = await page_html(context, url)
         except Exception as e:
             log.debug("indus: detail read failed for %s: %s", url, e)
-            return None
+            return None, None
+        return _developer_from_detail(page), _description_from_detail(page)

@@ -30,10 +30,30 @@ from app.utils.http_client import fetch
 log = logging.getLogger(__name__)
 
 
+async def app_store_listing(bundle_id: str, countries: list[str]) -> dict | None:
+    """The brand's own App Store listing, looked up by bundle id: {icon, publisher, seller_id}; None when no
+    country has it. The publisher is the seller name shown on the listing, the seller id is the store's artistId."""
+    for country in countries:
+        url = f"https://itunes.apple.com/lookup?bundleId={quote_plus(bundle_id)}&country={country}"
+        try:
+            results = _json.loads((await fetch(url, rotate_ua=False)).content).get("results", [])
+        except Exception as e:
+            log.info("itunes: listing lookup failed for %s/%s: %s", bundle_id, country, e)
+            continue
+        for item in results:
+            if (item.get("bundleId") or "").lower() == bundle_id.lower():
+                return {
+                    "icon": item.get("artworkUrl512") or item.get("artworkUrl100") or None,
+                    "publisher": item.get("sellerName") or item.get("artistName") or None,
+                    "seller_id": str(item["artistId"]) if item.get("artistId") else None,
+                }
+    return None
+
+
 class ItunesAdapter(SourceAdapter):
     name = "itunes"
     method = SourceMethod.api
-    host_group = "official_store"
+    host_group = "app_store"
     max_results = 25  # lookalikes can rank below the brand's own apps; scoring filters the noise
 
     _BASE = "https://itunes.apple.com/search"
@@ -72,6 +92,7 @@ class ItunesAdapter(SourceAdapter):
                         publisher=item.get("sellerName") or item.get("artistName"),
                         developer_id=str(item["artistId"]) if item.get("artistId") else None,
                         description=(item.get("description") or "")[:1000] or None,
+                        icon_url=item.get("artworkUrl512") or item.get("artworkUrl100") or None,
                         url=track_url,
                         host=HostInfo(
                             group=self.host_group,

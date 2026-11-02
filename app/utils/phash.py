@@ -6,14 +6,23 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import weakref
 
 from app.utils.http_client import FetchError, fetch
 
 log = logging.getLogger(__name__)
 
-# Global cap across all concurrent scans (4 scans × ~4 slots each).
-# Prevents icon CDNs from being hammered and keeps memory usage predictable.
-_ICON_SEM = asyncio.Semaphore(16)
+# Cap on concurrent icon downloads per event loop. Each scan runs in its own asyncio.run() loop, and an
+# asyncio.Semaphore is bound to the loop that first uses it, so one shared semaphore fails on later scans.
+_ICON_SLOTS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _icon_sem() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    sem = _ICON_SLOTS.get(loop)
+    if sem is None:
+        sem = _ICON_SLOTS[loop] = asyncio.Semaphore(16)
+    return sem
 
 
 async def compute_phash(image_url: str, hash_size: int = 8, cache: dict[str, str] | None = None) -> str:
@@ -24,7 +33,7 @@ async def compute_phash(image_url: str, hash_size: int = 8, cache: dict[str, str
         import imagehash
         from PIL import Image
 
-        async with _ICON_SEM:
+        async with _icon_sem():
             resp = await fetch(image_url, rotate_ua=True)
         img = Image.open(io.BytesIO(resp.content))
         result = str(imagehash.phash(img, hash_size=hash_size))

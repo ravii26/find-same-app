@@ -18,6 +18,7 @@ from app.api.models import (
     SourceMethod,
     SourceStatus,
 )
+from app.services.brand_match import presence_any
 from app.sources.base import (
     SourceAdapter,
     embedded_package,
@@ -41,6 +42,7 @@ class UptodownAdapter(SourceAdapter):
     async def search(self, ctx: ScanContext) -> tuple[list[Hit], SourceStatus]:
 
         brand_tokens = {t.lower() for t in ctx.request.brand_name.split() if len(t) >= 3}
+        brands = [ctx.request.brand_name, *ctx.request.brand_aliases]
         terms = [
             kw.term for kw in ctx.expanded_keywords
             if kw.type.value in ("original", "lure")
@@ -101,6 +103,10 @@ class UptodownAdapter(SourceAdapter):
                             if name_el:
                                 name = (await name_el.text_content() or "").strip()
 
+                            # Uptodown's search returns any "phone" app: keep only the ones named or packaged as the brand
+                            if presence_any(brands, name, pkg, None) is None:
+                                continue  # not the brand, nor a near-miss spelling of it
+
                             dev = ""
                             dev_el = await app_page.query_selector("#author-link, .autor button, .autor a")
                             if dev_el:
@@ -110,6 +116,16 @@ class UptodownAdapter(SourceAdapter):
                             icon_el = await app_page.query_selector("img[itemprop='image']")
                             if icon_el:
                                 icon_url = await icon_el.get_attribute("src") or None
+
+                            version: str | None = None
+                            version_el = await app_page.query_selector(".version")
+                            if version_el:
+                                version = (await version_el.text_content() or "").strip() or None
+
+                            description: str | None = None
+                            desc_el = await app_page.query_selector(".text-description")
+                            if desc_el:
+                                description = (await desc_el.text_content() or "").strip()[:1000] or None  # same cap
 
                             uid = hashlib.sha256(app_url.encode()).hexdigest()[:32]
                             hits.append(scraped_hit(
@@ -124,6 +140,8 @@ class UptodownAdapter(SourceAdapter):
                                 package_id=pkg,
                                 publisher=dev or None,
                                 icon_url=icon_url,
+                                version=version,
+                                description=description,
                             ))
                         except Exception as e:
                             log.warning("uptodown: app page parse failed for %r: %s", app_url, e)

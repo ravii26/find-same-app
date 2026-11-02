@@ -31,7 +31,6 @@ BODY = {
     "evidence_urls": ["https://cdn.example.com/shots/4411-1.png"],
 }
 
-
 def _conflict():
     return ConflictError("conflict", meta=MagicMock(status=409), body={})
 

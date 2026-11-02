@@ -229,47 +229,6 @@ async def test_github_fetch_error_continues():
     assert status.error
 
 
-# ── Aptoide adapter ───────────────────────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_aptoide_returns_hits():
-    from app.sources.aptoide_adapter import AptoideAdapter
-
-    data = {
-        "datalist": {
-            "list": [{
-                "id": 99,
-                "name": "Petpooja Fake",
-                "package": "com.petpooja.fake",
-                "file": {"vername": "2.0"},
-                "developer": {"name": "Fake Dev"},
-                "urls": {"w": "https://petpooja-fake.en.aptoide.com/"},
-                "malware": {"rank": "TRUSTED"},
-            }]
-        }
-    }
-    resp = _mock_response(json.dumps(data).encode())
-
-    with patch("app.sources.aptoide_adapter.fetch", new=AsyncMock(return_value=resp)):
-        adapter = AptoideAdapter()
-        hits, status = await adapter.search(_make_ctx())
-
-    assert len(hits) > 0
-    assert status.status == "ok"
-
-
-@pytest.mark.asyncio
-async def test_aptoide_fetch_error():
-    from app.sources.aptoide_adapter import AptoideAdapter
-    from app.utils.http_client import FetchError
-
-    with patch("app.sources.aptoide_adapter.fetch", new=AsyncMock(side_effect=FetchError("err"))):
-        adapter = AptoideAdapter()
-        hits, status = await adapter.search(_make_ctx())
-
-    assert hits == []
-
-
 # ── Base adapter _run wrapper ─────────────────────────────────────────────────
 
 @pytest.mark.asyncio

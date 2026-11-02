@@ -9,7 +9,7 @@ from app.sources.apkfab_adapter import APKFabAdapter
 from app.sources.apkkit_adapter import APKKitAdapter
 from app.sources.apkmirror_adapter import APKMirrorAdapter
 from app.sources.apkpure_adapter import APKPureAdapter
-from app.sources.aptoide_adapter import AptoideAdapter
+from app.sources.aptoide_store_adapter import AptoideStoreAdapter
 from app.sources.base import SourceAdapter
 from app.sources.bing_adapter import BingAdapter
 from app.sources.duckduckgo_adapter import DuckDuckGoAdapter
@@ -42,7 +42,7 @@ def get_all_adapters() -> list[SourceAdapter]:
         DuckDuckGoAdapter(),
         LookalikeDomainAdapter(),   # needs official_domain in the request
         # APK sites — HTTP/scrape, no credentials
-        AptoideAdapter(),
+        AptoideStoreAdapter(),
         APKPureAdapter(),
         APKMirrorAdapter(),
         APKFabAdapter(),

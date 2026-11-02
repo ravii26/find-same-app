@@ -22,10 +22,10 @@ from app.api.models import (
     SourceMethod,
     SourceStatus,
 )
-from app.services.keyword_expansion import fold_homoglyphs
-from app.sources.base import SourceAdapter, brand_words, pkg_queries, scraped_hit
+from app.services.brand_match import presence_any
+from app.sources.base import SourceAdapter, pkg_queries, scraped_hit
 from app.utils.browser import hits_from_browser
-from app.utils.http_client import BlockedError, FetchError
+from app.utils.http_client import BlockedError, FetchError, decode_response, fetch, throttle
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +33,38 @@ _BASE = "https://www.apk4fun.com"
 _SEARCH = _BASE + "/s.php?s={q}"
 
 _PKG_RE = re.compile(r"/apps/([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+)/", re.IGNORECASE)
+# App pages read per scan: one plain HTTP request each (the /apps/<package>/ pages; robots.txt allows them).
+_APP_PAGE_LIMIT = 10
+
+
+_VERSION_RE = re.compile(r"Latest Version:\s*([^\n•]+)")
+_DEVELOPER_RE = re.compile(r"Developer:\s*([^\n•]+)")
+_DESC_END_RE = re.compile(r"\n\s*(Permissions|Related|Download)\b")
+
+
+def app_facts(page_html: str) -> dict[str, str]:
+    """Version, developer and description from an /apps/<package>/ page (text labels, then the description block)."""
+    tree = HTMLParser(page_html)
+    lines_text = tree.body.text(separator="\n", strip=True) if tree.body else ""
+    facts: dict[str, str] = {}
+    if m := _VERSION_RE.search(lines_text):
+        facts["version"] = m.group(1).strip()
+    if m := _DEVELOPER_RE.search(lines_text):
+        facts["developer"] = m.group(1).strip()
+    # The description block starts "<App> Description: <text>"; the smallest element that holds that label
+    best = None
+    for node in tree.css("article, div, section, p"):
+        tx = node.text(strip=True)
+        if " Description:" in tx[:60] or tx.startswith("Description:"):
+            if best is None or len(tx) < len(best):
+                best = tx
+    if best:
+        text = best.split("Description:", 1)[1].strip()
+        end = _DESC_END_RE.search(text)
+        text = (text[: end.start()] if end else text).strip()
+        if text:
+            facts["description"] = text[:1000]  # same cap as the other stores
+    return facts
 
 
 class APK4FunAdapter(SourceAdapter):
@@ -41,8 +73,7 @@ class APK4FunAdapter(SourceAdapter):
     host_group = "apk_site"
 
     async def search(self, ctx: ScanContext) -> tuple[list[Hit], SourceStatus]:
-        brand = ctx.request.brand_name
-        brand_tokens = brand_words(brand)
+        brands = [ctx.request.brand_name, *ctx.request.brand_aliases]
 
         queries = pkg_queries(ctx)
 
@@ -55,7 +86,7 @@ class APK4FunAdapter(SourceAdapter):
             try:
                 hits.extend(await hits_from_browser(
                     url,
-                    lambda html, q=q: self._parse(html, q, brand_tokens, seen),
+                    lambda html, q=q: self._parse(html, q, brands, seen),
                     wait_for_selector="a.gs-title",
                 ))
             except BlockedError as e:
@@ -67,6 +98,9 @@ class APK4FunAdapter(SourceAdapter):
                 log.warning("apk4fun: fetch failed for %r: %s", q, e)
                 continue
 
+        # The search card has the name and package only. Each package's app page gives version, developer and description.
+        hits = [await self._with_app_page(h) for h in hits[:_APP_PAGE_LIMIT]] + hits[_APP_PAGE_LIMIT:]
+
         return hits, SourceStatus(
             name=self.name, method=self.method,
             status="ok" if not error else "failed",
@@ -74,7 +108,22 @@ class APK4FunAdapter(SourceAdapter):
             error=error if not hits else None,
         )
 
-    def _parse(self, html: str, query: str, brand_tokens: set[str], seen: set[str]) -> list[Hit]:
+    @staticmethod
+    async def _with_app_page(hit: Hit) -> Hit:
+        """The hit with version, developer and description from its /apps/<package>/ page. A page that cannot be read keeps the search fields."""
+        if not hit.package_id or "/apps/" not in hit.url:
+            return hit
+        try:
+            await throttle(hit.url)
+            resp = await fetch(hit.url, rotate_ua=False)
+        except (BlockedError, FetchError) as e:
+            log.info("apk4fun: app page not read %s: %s", hit.url, e)
+            return hit
+        facts = app_facts(decode_response(resp))
+        update = {dst: facts[src] for src, dst in (("version", "version"), ("developer", "publisher"), ("description", "description")) if facts.get(src)}
+        return hit.model_copy(update=update) if update else hit
+
+    def _parse(self, html: str, query: str, brands: list[str], seen: set[str]) -> list[Hit]:
         tree = HTMLParser(html)
         hits: list[Hit] = []
 
@@ -95,9 +144,8 @@ class APK4FunAdapter(SourceAdapter):
             if m:
                 pkg_id = m.group(1)
 
-            name_lower = fold_homoglyphs(name).lower()
-            pkg_lower = (pkg_id or "").lower()
-            if brand_tokens and not any(tok in name_lower or tok in pkg_lower for tok in brand_tokens):
+            # Keep only apps that carry the brand, near misses included (the same test the scorer uses)
+            if presence_any(brands, name, pkg_id, None) is None:
                 continue
 
             uid = hashlib.sha256(full_url.encode()).hexdigest()[:32]

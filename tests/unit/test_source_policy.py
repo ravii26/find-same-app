@@ -24,99 +24,98 @@ def test_store_hosts_have_explicit_rate(url, rps):
     assert RateLimiter(None)._rps(host) == rps
 
 
-# ── allowlist: an app needs its publisher AND its package id ───────────────────
+# ── allowlist: a store listing is checked against that store's own metadata ──
 
-from app.services.allowlist import allowlist_reason  # noqa: E402
+from app.services.allowlist import allowlist_reason, store_metadata  # noqa: E402
 
 
-def _app(package_id, publisher, *, url="https://store.example/app", official_store=False):
+def _app(package_id, publisher, *, url="https://store.example/app", domain="play.google.com"):
     return SimpleNamespace(
         package_id=package_id, publisher=publisher, url=url,
-        host=SimpleNamespace(group="app_store", is_official_store=official_store),
+        host=SimpleNamespace(group="app_store", name="Store", is_official_store=True, domain=domain),
     )
 
 
-_OFFICIAL = dict(declared={"com.sister.app"}, official_ids={"android": {"net.one97.paytm"}, "ios": set()}, domains=set(), publishers={"paytm mobile solutions"})
+def _store_app(package_id, publisher, *, store_domain):
+    return _app(package_id, publisher, domain=store_domain)
 
 
-def test_publisher_and_official_package_allowlists():
+PAYTM_PLAY = dict(
+    official_ids={"android": set(), "ios": set()}, domains=set(),
+    store_meta=store_metadata([("net.one97.paytm", "PayTM Mobile Solutions Private Limited", None)]),
+)
+
+
+def test_play_package_and_publisher_allowlists():
     hit = _app("net.one97.paytm", "PayTM Mobile Solutions Private Limited")
-    assert allowlist_reason(hit, **_OFFICIAL)
+    assert allowlist_reason(hit, **PAYTM_PLAY)
 
 
-def test_publisher_and_declared_sister_package_allowlists():
-    hit = _app("com.sister.app", "PayTM Mobile Solutions Private Limited")
-    assert allowlist_reason(hit, **_OFFICIAL)
+def test_same_package_and_publisher_on_an_apk_site_is_not_allowlisted():
+    hit = _app("net.one97.paytm", "PayTM Mobile Solutions Private Limited", domain="apk-site.example")
+    assert allowlist_reason(hit, **PAYTM_PLAY) is None
 
 
-def test_official_store_alone_does_not_allowlist():
-    hit = _app("com.paytm.clone", "PayTM Mobile Solutions Private Limited", official_store=True)
-    assert allowlist_reason(hit, **_OFFICIAL) is None
+def test_play_hit_with_another_package_is_not_allowlisted():
+    hit = _app("com.paytm.clone", "PayTM Mobile Solutions Private Limited")
+    assert allowlist_reason(hit, **PAYTM_PLAY) is None
 
 
-def test_package_without_matching_publisher_is_not_allowlisted():
+def test_play_package_with_another_publisher_is_not_allowlisted():
     hit = _app("net.one97.paytm", "rohit raj")
-    assert allowlist_reason(hit, **_OFFICIAL) is None
+    assert allowlist_reason(hit, **PAYTM_PLAY) is None
 
 
-def test_publisher_without_matching_package_is_not_allowlisted():
+def test_publisher_with_another_play_package_is_not_allowlisted():
     hit = _app("com.random.other", "PayTM Mobile Solutions Private Limited")
-    assert allowlist_reason(hit, **_OFFICIAL) is None
+    assert allowlist_reason(hit, **PAYTM_PLAY) is None
+
+
+def test_no_play_metadata_allowlists_no_play_app():
+    hit = _app("net.one97.paytm", "PayTM Mobile Solutions Private Limited")
+    assert allowlist_reason(hit, **{**PAYTM_PLAY, "store_meta": {}}) is None
 
 
 def test_official_domain_does_not_allowlist_an_app():
     hit = _app("com.random.other", "rohit raj", url="https://www.paytm.com/download")
-    assert allowlist_reason(hit, **{**_OFFICIAL, "domains": {"paytm.com"}}) is None
-
-
-def test_no_declared_publishers_allowlists_nothing():
-    hit = _app("net.one97.paytm", "PayTM Mobile Solutions Private Limited")
-    assert allowlist_reason(hit, **{**_OFFICIAL, "publishers": set()}) is None
+    assert allowlist_reason(hit, **{**PAYTM_PLAY, "domains": {"paytm.com"}}) is None
 
 
 def test_web_hit_on_official_domain_is_still_allowlisted():
-    hit = SimpleNamespace(package_id=None, publisher=None, url="https://support.paytm.com/help",
-                          host=None)
-    assert allowlist_reason(hit, **{**_OFFICIAL, "domains": {"paytm.com"}})
+    hit = SimpleNamespace(package_id=None, publisher=None, url="https://support.paytm.com/help", host=None)
+    assert allowlist_reason(hit, **{**PAYTM_PLAY, "domains": {"paytm.com"}})
 
 
-# ── platform-aware ids: a package id is unique per store ──────────────────────
+# ── each store is compared with its own metadata only ─────────────────────────
+
+SBI_BOTH = dict(
+    official_ids={"android": set(), "ios": set()}, domains=set(),
+    store_meta=store_metadata([("com.sbi.lotusintouch", None, None)], [("com.sbi.YONOBD", "State Bank of India", None)]),
+)
+
+
+def test_app_store_bundle_and_seller_allowlists_on_the_app_store():
+    hit = _store_app("com.sbi.YONOBD", "State Bank of India", store_domain="apps.apple.com")
+    assert allowlist_reason(hit, **SBI_BOTH)
+
+
+def test_app_store_bundle_is_not_allowlisted_on_google_play():
+    hit = _store_app("com.sbi.YONOBD", "State Bank of India", store_domain="play.google.com")
+    assert allowlist_reason(hit, **SBI_BOTH) is None
+
+
+def test_play_package_is_not_allowlisted_on_the_app_store():
+    hit = _store_app("com.sbi.lotusintouch", "State Bank of India", store_domain="apps.apple.com")
+    assert allowlist_reason(hit, **SBI_BOTH) is None
+
+
+def test_app_store_seller_does_not_clear_a_play_listing():
+    # The Play listing has no publisher metadata, so the App Store's seller name is not used for it
+    hit = _store_app("com.sbi.lotusintouch", "State Bank of India", store_domain="play.google.com")
+    assert allowlist_reason(hit, **SBI_BOTH) is None
+
 
 from app.api.models import ScanRequest  # noqa: E402
-
-
-def _store_app(package_id, publisher, *, store_domain):
-    return SimpleNamespace(
-        package_id=package_id, publisher=publisher, url=f"https://{store_domain}/app", publisher_ids=[],
-        host=SimpleNamespace(group="app_store", is_official_store=True, domain=store_domain),
-    )
-
-
-_SBI = dict(declared=set(), domains=set(), publishers={"state bank of india"})
-
-
-def test_ios_bundle_is_allowlisted_on_the_app_store():
-    hit = _store_app("com.sbi.YONOBD", "State Bank of India", store_domain="apps.apple.com")
-    ids = {"android": set(), "ios": {"com.sbi.yonobd"}}
-    assert allowlist_reason(hit, official_ids=ids, **_SBI)
-
-
-def test_ios_bundle_is_not_allowlisted_on_google_play():
-    hit = _store_app("com.sbi.YONOBD", "State Bank of India", store_domain="play.google.com")
-    ids = {"android": set(), "ios": {"com.sbi.yonobd"}}
-    assert allowlist_reason(hit, official_ids=ids, **_SBI) is None
-
-
-def test_android_id_is_not_allowlisted_on_the_app_store():
-    hit = _store_app("com.sbi.lotusintouch", "State Bank of India", store_domain="apps.apple.com")
-    ids = {"android": {"com.sbi.lotusintouch"}, "ios": set()}
-    assert allowlist_reason(hit, official_ids=ids, **_SBI) is None
-
-
-def test_extra_android_package_is_allowlisted_on_google_play():
-    hit = _store_app("com.YONOMUApp", "State Bank of India", store_domain="play.google.com")
-    ids = {"android": {"com.yonomuapp"}, "ios": set()}
-    assert allowlist_reason(hit, official_ids=ids, **_SBI)
 
 
 def test_request_keeps_ids_per_platform():
@@ -141,8 +140,3 @@ def test_single_id_fields_are_refused_not_dropped():
         ScanRequest(brand_name="YONO SBI", ios_bundle="com.sbi.YONOBD")
 
 
-def test_hit_without_store_domain_is_treated_as_android():
-    hit = _store_app("com.sbi.lotusintouch", "State Bank of India", store_domain="play.google.com")
-    hit.host = SimpleNamespace(group="app_store", is_official_store=True)  # no domain attribute
-    ids = {"android": {"com.sbi.lotusintouch"}, "ios": set()}
-    assert allowlist_reason(hit, official_ids=ids, **_SBI)

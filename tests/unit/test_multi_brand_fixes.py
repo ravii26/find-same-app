@@ -65,7 +65,7 @@ def test_cut_short_matching_is_narrow():
     assert not publisher_matches(None, PUBLISHERS)
 
 
-async def test_a_sibling_on_another_store_is_cleared_once_play_confirms_the_account():
+async def test_a_sibling_on_an_apk_site_stays_a_finding_even_when_play_confirms_the_account():
     from app.services import orchestrator
 
     sibling = _hit(app_name="Paytm Payments Bank", package_id="com.paytm.bank",
@@ -75,7 +75,7 @@ async def test_a_sibling_on_another_store_is_cleared_once_play_confirms_the_acco
         request = await orchestrator._verify_off_play_packages("scn_t", PAYTM, [sibling])
     assert "com.paytm.bank" in request.android_packages
     remaining, allowed = split_allowlisted([sibling], request)
-    assert remaining == [] and "publisher" in allowed[0].reason
+    assert remaining == [sibling] and allowed == []  # only the Play listing itself is allowlisted
 
 
 async def test_a_package_play_shows_under_another_account_is_not_cleared():

@@ -164,7 +164,7 @@ def country_label(term: str, country: str, countries: list[str]) -> str:
 class SourceAdapter(ABC):
     name: str
     method: SourceMethod
-    host_group: str  # e.g. "official_store", "apk_site", "file_host", "code_host"
+    host_group: str  # e.g. "app_store", "apk_site", "code_host", "channel", "search_engine"
 
     # Max hits a source may contribute *per distinct query*. Sources return
     # relevance-ordered results, so we keep the first N of each query — e.g. a

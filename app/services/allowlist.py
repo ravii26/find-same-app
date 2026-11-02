@@ -1,31 +1,22 @@
 # app/services/allowlist.py
 """Allowlist: keep the brand's own apps, domains and publishers out of the rogue results.
 
-Nothing is guessed. An app on Google Play or the App Store is allowlisted when the store says one of the brand's
-accounts publishes it:
+Nothing is guessed. Each hit is checked in this order, and the first rule that matches clears it:
 
-  account    the hit's developer_id (Play developer id, App Store artistId) is in `play_developer_ids` or
-             `app_store_seller_ids` for that store. The store issues these ids and only the account owner can
-             publish under one, so this covers the brand's sibling apps without listing each package. The id is
-             read from the store itself, so it never comes from a third-party site.
+  1. App Store artist id   an App Store hit whose developer_id (artistId) is the artistId of the App Store URL the
+                           caller gave. Only App Store hits are checked by this rule.
+  2. Package and publisher the hit's package_id and publisher match its own store's metadata, read from the store
+                           for the caller's URL:
+                             Google Play  package_id and publisher match one Play listing the caller gave
+                                          (android_packages): the package and its developer name
+                             App Store    package_id and publisher match one App Store listing the caller gave
+                                          (ios_bundles): the bundle and its seller name
+                           Each store is compared only with its own metadata. A copy on an APK site or any other store
+                           is never cleared by this rule, because it can state the same publisher and package itself.
+  3. Play developer id     a Google Play hit whose developer_id is one of the brand's play_developer_ids.
+  4. Official domain       a web hit whose URL's registrable domain is official_domain or one of official_domains.
+  5. Brand's Play link     a search result that links to a Google Play package the brand owns.
 
-Any other app is allowlisted only when BOTH of these match what the caller declared:
-
-  publisher  the hit's publisher equals an `official_publishers` entry (case, punctuation and corporate
-             suffixes ignored).
-  package    the hit's package_id is one of the brand's official ids for the hit's platform (`android_package` and
-             `android_packages` for Android hits; `ios_bundle` and `ios_bundles` for App Store hits), or an
-             `allowlist_packages` entry. A package id is unique per store, so an iOS bundle never counts on
-             Google Play and an Android id never counts on the App Store.
-
-The store the hit was found on does not count, and neither do its URL or its domain. A third-party copy that
-keeps both the name and the id is decided by publisher and package id, not here.
-
-Non-app hits (web pages) keep one rule:
-  domain     the URL's registrable domain is `official_domain` or one of `official_domains`.
-
-Sister apps (another app by the same company, e.g. a business app) need their id in `allowlist_packages`
-and the company name in `official_publishers`.
 Every allowlisted hit is reported with its reason in `ScanReport.allowlisted` for audit.
 """
 
@@ -65,16 +56,6 @@ def publisher_matches(name: str | None, publishers: set[str] | frozenset[str]) -
     return False
 
 
-def _declared_packages(request: ScanRequest) -> set[str]:
-    """Package ids the caller declared as legitimate (sister apps), on any platform.
-
-    The brand's own ids are excluded: they are checked per platform (see _official_ids), so a copy
-    on the wrong platform never matches them.
-    """
-    own = set().union(*_official_ids(request).values())
-    return {p.strip().lower() for p in request.allowlist_packages if p} - own
-
-
 def _official_ids(request: ScanRequest) -> dict[str, set[str]]:
     """The brand's own app ids per platform (see ScanRequest.official_app_ids)."""
     return request.official_app_ids()
@@ -98,11 +79,8 @@ APP_STORE_DOMAIN = "apps.apple.com"
 
 
 def official_accounts(request: ScanRequest) -> dict[str, set[str]]:
-    """The brand's store account ids, keyed by the store's domain."""
-    return {
-        PLAY_DOMAIN: set(request.play_developer_ids),
-        APP_STORE_DOMAIN: set(request.app_store_seller_ids),
-    }
+    """The brand's Google Play developer ids, keyed by the store's domain. App Store artist ids come from the URL."""
+    return {PLAY_DOMAIN: set(request.play_developer_ids)}
 
 
 def official_publishers(request: ScanRequest) -> set[str]:
@@ -112,27 +90,53 @@ def official_publishers(request: ScanRequest) -> set[str]:
     return pubs
 
 
-def allowlist_reason(
-    hit: Hit, declared: set[str], official_ids: dict[str, set[str]], domains: set[str], publishers: set[str],
-    accounts: dict[str, set[str]] | None = None,
-) -> str | None:
-    """Why this hit is allowlisted, or None.
+def _id(value: object) -> str | None:
+    """A store developer id as text: Play gives text or numbers, the App Store numbers."""
+    text = str(value).strip() if value is not None else ""
+    return text or None
 
-    An app on Google Play or the App Store is allowlisted when one of the brand's accounts publishes it there.
-    Any other app (a hit with a package id) is allowlisted only when its publisher and its package id both match
-    what the caller declared. The store it was found on, its URL and its domain do not count.
-    Other hits (web pages) keep the domain rule.
+
+def store_metadata(
+    play_listings: list[tuple[str | None, str | None, object]] = (),
+    app_store_listings: list[tuple[str | None, str | None, object]] = (),
+) -> dict[str, dict]:
+    """The brand's own listings, read from the store for each Play package and App Store bundle the caller gave.
+
+    A Play listing is (package, developer name, developer id). An App Store listing is (bundle, seller name,
+    artist id). Each listing is kept as one pair, so a hit clears only against the listing it belongs to. The developer
+    ids of all listings of a store are collected in seller_ids. A store with nothing read is absent.
     """
+    meta: dict[str, dict] = {}
+    for domain, listings in ((PLAY_DOMAIN, play_listings), (APP_STORE_DOMAIN, app_store_listings)):
+        pairs = [{"package": pkg.strip().lower(), "publisher": _norm_publisher(pub)}
+                 for pkg, pub, _ in listings if pkg and pub and _norm_publisher(pub)]
+        ids = {_id(dev) for _, _, dev in listings} - {None}
+        if pairs or ids:
+            meta[domain] = {"listings": pairs, "seller_ids": ids}
+    return meta
+
+
+def allowlist_reason(
+    hit: Hit, official_ids: dict[str, set[str]], domains: set[str],
+    store_meta: dict[str, dict] | None = None,
+) -> str | None:
+    """Why this hit is allowlisted, or None. The rules run in the order given in the module docstring."""
     domain = getattr(hit.host, "domain", None) if hit.host else None
-    developer_id = getattr(hit, "developer_id", None)
-    if developer_id and domain and developer_id in (accounts or {}).get(domain, set()):
+    developer_id = _id(getattr(hit, "developer_id", None))
+    meta = store_meta or {}
+
+    # 1. Developer id (Play developer id, App Store artist id), from the URL the caller gave, on the hit's own store
+    if developer_id and developer_id in meta.get(domain or "", {}).get("seller_ids", set()):
         return f"published by the brand's {hit.host.name} account {developer_id}"
 
     pkg = (hit.package_id or "").strip().lower()
     if pkg:
-        own = official_ids.get(_platform(hit), set())
-        if publishers and publisher_matches(hit.publisher, publishers) and pkg in (declared | own):
-            return f"package {hit.package_id} and publisher '{hit.publisher}' match the declared app"
+        # 2. Package and publisher, against the hit's own store only
+        if any(
+            listing["package"] == pkg and publisher_matches(hit.publisher, {listing["publisher"]})
+            for listing in meta.get(domain or "", {}).get("listings", [])
+        ):
+            return f"package {hit.package_id} and publisher '{hit.publisher}' match the brand's {hit.host.name} listing"
         return None
 
     if domains and registrable_domain(hit.url).lower() in domains:
@@ -151,15 +155,16 @@ def allowlist_reason(
 
 def split_allowlisted(
     hits: list[Hit], request: ScanRequest, keep_official: bool = True,
+    store_meta: dict[str, dict[str, set[str]]] | None = None,
 ) -> tuple[list[Hit], list[AllowlistedItem]]:
     """Return (remaining hits, allowlisted items).
 
     Official-listing hits (`is_official_match`) are kept in `remaining` when
-    keep_official is True so icon/permission comparison can still use them; the
+    keep_official is True so icon comparison can still use them; the
     caller drops them after scoring with `drop_official`.
     """
-    declared, official_ids = _declared_packages(request), _official_ids(request)
-    domains, publishers, accounts = _domains(request), official_publishers(request), official_accounts(request)
+    official_ids = _official_ids(request)
+    domains, accounts = _domains(request), official_accounts(request)
 
     # An app the store shows under one of the brand's accounts is the brand's own: its package id then counts as an
     # official id, so the same package on another store or APK site is allowlisted too — still only when that
@@ -173,7 +178,7 @@ def split_allowlisted(
         if keep_official and h.is_official_match:
             remaining.append(h)
             continue
-        reason = allowlist_reason(h, declared, official_ids, domains, publishers, accounts)
+        reason = allowlist_reason(h, official_ids, domains, store_meta)
         if reason:
             allowed.append(_item(h, reason))
         else:
@@ -210,6 +215,7 @@ def _item(hit: Hit, reason: str) -> AllowlistedItem:
         app_name=hit.app_name or hit.title,
         package_id=hit.package_id,
         publisher=hit.publisher,
+        developer_id=hit.developer_id,
         source=hit.host.name if hit.host else None,
         reason=reason,
     )

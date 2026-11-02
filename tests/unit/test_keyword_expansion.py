@@ -49,10 +49,16 @@ def test_expand_contains_homoglyph():
     assert KeywordType.homoglyph in types
 
 
-def test_expand_contains_package_guess():
+def test_expand_has_no_package_guesses():
     kws = expand(_make_request())
-    types = {k.type for k in kws}
-    assert KeywordType.package_guess in types
+    assert KeywordType.package_guess not in {k.type for k in kws}
+    assert not any(k.term.startswith(("com.petpooja", "org.petpooja", "io.petpooja")) for k in kws)
+
+
+def test_lures_are_english_only():
+    lures = [k.term for k in expand(_make_request()) if k.type == KeywordType.lure]
+    assert lures and all(t.isascii() for t in lures)
+    assert "petpooja apk" in {t.lower() for t in lures}
 
 
 def test_expand_deduplicated():

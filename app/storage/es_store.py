@@ -66,7 +66,6 @@ HITS_MAPPING: dict[str, Any] = {
         "reasons": {"type": "text"},
         "is_official_match": {"type": "boolean"},
         "icon_similarity": {"type": "float"},
-        "permission_similarity": {"type": "float"},
         "domain_similarity": {"properties": {
             "domain": {"type": "keyword"},
             "closest_official": {"type": "keyword"},
@@ -75,11 +74,7 @@ HITS_MAPPING: dict[str, Any] = {
         "evidence": {"properties": {
             "captured_at": {"type": "date"},
             "http_status": {"type": "integer"},
-            "page_path": _KW,
-            "page_sha256": {"type": "keyword"},
             "screenshot_path": _KW,
-            "icon_path": _KW,
-            "icon_sha256": {"type": "keyword"},
             "assessment": {"type": "keyword"},
             "error": {"type": "text"},
         }},

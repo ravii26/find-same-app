@@ -184,7 +184,6 @@ def merge_into_request(body: ScanRequest, doc: dict[str, Any], own_apps: list[di
     ios = [a["id"] for a in own_apps if a["store"] == "app_store"]
     publishers = [a["publisher"] for a in own_apps if a.get("publisher")]
     play_devs = [a["developer_id"] for a in own_apps if a["store"] == "play" and a.get("developer_id")]
-    sellers = [a["developer_id"] for a in own_apps if a["store"] == "app_store" and a.get("developer_id")]
     domains = doc.get("official_domains", [])
     return body.model_copy(update={
         "brand_name": doc["brand_name"],
@@ -194,7 +193,6 @@ def merge_into_request(body: ScanRequest, doc: dict[str, Any], own_apps: list[di
         "ios_bundles": list(dict.fromkeys([*body.ios_bundles, *ios])),
         "official_publishers": list(dict.fromkeys([*body.official_publishers, *publishers])),
         "play_developer_ids": list(dict.fromkeys([*body.play_developer_ids, *play_devs])),
-        "app_store_seller_ids": list(dict.fromkeys([*body.app_store_seller_ids, *sellers])),
         "official_domains": list(dict.fromkeys([*body.official_domains, *domains])),
         "official_domain": body.official_domain or (domains[0] if domains else None),
     })

@@ -45,9 +45,9 @@ def test_near_miss_name_is_not_an_exact_alias_match():
 
 def test_threshold_follows_the_source_group():
     social = Hit(id="1", type="web_page", url="https://x.example", relevance_score=38,
-                 host=HostInfo(group="web_search", name="Bing", domain="bing.com"),
+                 host=HostInfo(group="search_engine", name="Bing", domain="bing.com"),
                  discovered_at=datetime.datetime.now(datetime.UTC))
-    store = social.model_copy(update={"host": HostInfo(group="official_store", name="Play", domain="play.google.com")})
+    store = social.model_copy(update={"host": HostInfo(group="app_store", name="Play", domain="play.google.com")})
     assert min_relevance_for(social) == 40
     assert min_relevance_for(store) == 35
 

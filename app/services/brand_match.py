@@ -24,6 +24,7 @@ from functools import lru_cache
 
 from rapidfuzz.distance import Levenshtein
 
+from app.config.phrases import default_words
 from app.utils.similarity import _norm
 
 # Words too common to identify a brand on their own.
@@ -83,15 +84,8 @@ def _best_sim(target: str, text: str | None) -> float:
 # Brands this short or shorter must match a whole word (optionally plus a lure suffix/prefix):
 # "uber" is a real match in "UberPro" or "Uber Driver", not in "Uberaba" or "Tuberculosis".
 SHORT_BRAND_LEN = 5
-_LURE_SUFFIXES_RAW = ({
-    "app", "apps", "apk", "pro", "lite", "plus", "mod", "free", "cash", "pay", "clone", "driver",
-    "partner", "business", "official", "hack", "premium", "money", "wallet", "online", "india",
-    "web", "wa", "new", "vip", "gold", "max", "prime", "rewards", "bonus", "offer", "login",
-})
-_LURE_PREFIXES_RAW = ({"get", "my", "go", "the", "new", "true", "i", "e", "mi", "gb", "fm"})
-
-_LURE_SUFFIXES = frozenset(fold(w) for w in _LURE_SUFFIXES_RAW)
-_LURE_PREFIXES = frozenset(fold(w) for w in _LURE_PREFIXES_RAW)
+_LURE_SUFFIXES = frozenset(fold(w) for w in default_words("brand_suffixes"))
+_LURE_PREFIXES = frozenset(fold(w) for w in default_words("brand_prefixes"))
 
 
 def _short_word_match(token: str, text: str) -> bool:

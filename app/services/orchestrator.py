@@ -70,6 +70,8 @@ class _State:
     expanded_keywords: list = field(default_factory=list)
     # How far `hits` got: "collecting" (raw or deduplicated), "allowlisted" (unscored), "ranked" (the results)
     stage: str = "collecting"
+    # The brand's own metadata per store, read from the store (see allowlist.store_metadata)
+    store_meta: dict = field(default_factory=dict)
     # (name, method) of every source the scan started, so one that never finished is still reported
     sources: list[tuple[str, SourceMethod]] = field(default_factory=list)
     # (domain, listing field) of the brand's domains read from its Google Play listing for this scan
@@ -108,8 +110,7 @@ async def run_scan(scan_id: str, request: ScanRequest, redis_client: aioredis.Re
             try:
                 await asyncio.wait_for(_rank_unfinished(scan_id, st), _SALVAGE_SECONDS)
                 st.warnings.append(
-                    "Results were allowlisted and scored from what was collected, without the icon and permission "
-                    "checks."
+                    "Results were allowlisted and scored from what was collected, without the icon check."
                 )
             except Exception as exc:  # the raw hits are still reported, and marked as such
                 _note(scan_id, "ERROR", f"could not score the collected hits: {type(exc).__name__}: {exc}")
@@ -167,16 +168,17 @@ async def _rank_unfinished(scan_id: str, st: _State) -> None:
     """The pipeline stopped before its results were ranked: allowlist, score and rank what was collected.
 
     Otherwise the report would list every raw hit, the brand's own apps included, as a result with score 0.
-    The Play developer-id lookups run within _SALVAGE_LOOKUP_SECONDS; the icon and permission checks are skipped.
+    The Play developer-id lookups run within _SALVAGE_LOOKUP_SECONDS; the icon check is skipped.
     """
     request, hits = st.request, st.hits
     if st.stage == "collecting":
         hits = deduplicate(hits)
-        request = _learn_app_store_sellers(request, hits)
         hits = await _stamp_play_developers(scan_id, request, hits, timeout=_SALVAGE_LOOKUP_SECONDS)
         request = await _verify_off_play_packages(scan_id, request, hits, timeout=_SALVAGE_LOOKUP_SECONDS)
         st.request = request
-        hits, st.allowlisted = split_allowlisted(hits, request)
+        hits, st.allowlisted = split_allowlisted(hits, request, store_meta=st.store_meta)
+        hits, official_dropped = drop_official(hits)
+        st.allowlisted = st.allowlisted + official_dropped
     publishers = official_publishers(request)
     scored = list(await asyncio.gather(*[score_hit(h, request, publishers) for h in hits]))
     below = [h for h in scored if h.relevance_score < min_relevance_for(h)]
@@ -237,7 +239,7 @@ def _official_listing_warnings(request: ScanRequest, hits: list[Hit], statuses: 
     """Warn when the caller's official android_package / ios_bundle cannot be found on its store.
 
     Without the official listing the scan cannot learn the official publisher, compare icons or
-    permissions, so the brand's own apps (and sister apps by the same publisher) may be reported as rogue.
+    so the brand's own apps (and sister apps by the same publisher) may be reported as rogue.
     """
     by_name = {s.name: s for s in statuses}
     android_stores = {"play.google.com", "global.app.mi.com", "appgallery.huawei.com"}
@@ -258,24 +260,11 @@ def _official_listing_warnings(request: ScanRequest, hits: list[Hit], statuses: 
         else:
             why = "it was looked up directly and is not listed"
         out.append(
-            f"{name} '{value}' was not found on {store} ({why}). Official-app checks (icon and "
-            f"permission comparison) are skipped, so the brand's own apps may be reported as rogue; "
-            f"check the value and list the brand's other apps in allowlist_packages / official_publishers."
+            f"{name} '{value}' was not found on {store} ({why}). Official-app checks (icon "
+            f"comparison) are skipped, so the brand's own apps may be reported as rogue; "
+            f"check the value and the brand's store links."
         )
     return out
-
-
-def _learn_app_store_sellers(request: ScanRequest, hits: list[Hit]) -> ScanRequest:
-    """Add the seller id (artistId) of the brand's own App Store listings to app_store_seller_ids.
-
-    A bundle id is unique on the App Store, so the account that publishes a declared bundle there is the brand's.
-    """
-    sellers = list(request.app_store_seller_ids)
-    for h in hits:
-        if h.is_official_match and h.developer_id and h.host and h.host.domain == APP_STORE_DOMAIN:
-            if h.developer_id not in sellers:
-                sellers.append(h.developer_id)
-    return request.model_copy(update={"app_store_seller_ids": sellers})
 
 
 _MAX_OFF_PLAY_LOOKUPS = 20
@@ -351,12 +340,18 @@ async def _stamp_play_developers(
 
     async def _one(pkg: str) -> str | None:
         async with sem:
-            return (await fetch_account(pkg, countries))[1]
+            developer, developer_id = await fetch_account(pkg, countries)
+        if developer_id:
+            _note(scan_id, "INFO", f"developer id lookup {pkg}: developer '{developer}' id '{developer_id}'")
+        else:
+            _note(scan_id, "WARN", f"developer id lookup {pkg}: no developer id (listing not read or none shown)")
+        return developer_id
 
     lookups = {asyncio.create_task(_one(hits[i].package_id)): i for i in todo}
     done, pending = await asyncio.wait(lookups, timeout=timeout)
     for task in pending:
         task.cancel()
+        _note(scan_id, "WARN", f"developer id lookup {hits[lookups[task]].package_id}: timed out, not read")
     out = list(hits)
     for task in done:
         i = lookups[task]
@@ -384,33 +379,24 @@ async def _pipeline(scan_id: str, request: ScanRequest, redis_client: aioredis.R
              "wording are reported, and the brand's own apps may be among them. Store the brand with "
              "POST /v1/brand-details for a full scan.")
 
-    # Fetch official permissions for permission-similarity scoring (Play Store, no APK needed).
-    official_permissions: list[str] = []
-    if request.android_package:
-        try:
-            from app.services.play_listing import fetch_permissions
-            official_permissions = await fetch_permissions(request.android_package)
-            if not official_permissions:
-                warn(f"No permissions could be read for android_package '{request.android_package}' from Google Play; "
-                     "permission comparison is skipped.")
-        except Exception as exc:
-            warn(f"Official permission fetch failed: {exc}")
     # The official developer is whoever publishes the caller's own android_package on Google Play. Learning it
     # here means sister apps by the same company are recognised without the caller listing official_publishers,
     # and the developer account id allowlists every Play app that account publishes.
-    if request.android_package:
+    from app.services.play_listing import fetch_account
+    play_listings: list[tuple[str, str | None, str | None]] = []  # (package, developer name, developer id)
+    for pkg in request.android_packages:
         try:
-            from app.services.play_listing import fetch_account
-            developer, developer_id = await fetch_account(request.android_package, settings.default_country_list())
+            developer, developer_id = await fetch_account(pkg, settings.default_country_list())
         except Exception as exc:
             developer = developer_id = None
-            _note(scan_id, "WARN", f"official developer lookup failed: {exc}")
+            _note(scan_id, "WARN", f"official developer lookup failed for {pkg}: {exc}")
+        play_listings.append((pkg, developer, developer_id))
         if developer and developer.casefold() not in {p.casefold() for p in request.official_publishers}:
             request = request.model_copy(update={"official_publishers": [*request.official_publishers, developer]})
-            _note(scan_id, "INFO", f"official publisher '{developer}' read from the Google Play listing of {request.android_package}")
+            _note(scan_id, "INFO", f"official publisher '{developer}' read from the Google Play listing of {pkg}")
         if developer_id and developer_id not in request.play_developer_ids:
             request = request.model_copy(update={"play_developer_ids": [*request.play_developer_ids, developer_id]})
-            _note(scan_id, "INFO", f"official Play developer id '{developer_id}' read from the listing of {request.android_package}")
+            _note(scan_id, "INFO", f"official Play developer id '{developer_id}' read from the listing of {pkg}")
     st.request = request  # with what was learned, so a scan that stops early still allowlists with it
 
     # The brand's own Play listing gives its icon (the reference for icon comparison; the listing itself is
@@ -425,7 +411,22 @@ async def _pipeline(scan_id: str, request: ScanRequest, redis_client: aioredis.R
             st.derived_domains = listing_domains(listing)
         except Exception as exc:
             warn(f"Official listing read failed: {exc}")
-    derived = [domain for domain, _ in st.derived_domains if domain not in request.official_domains]
+    from app.sources.itunes import app_store_listing
+    app_store_listings: list[tuple[str, str | None, str | None]] = []  # (bundle, seller name, artist id)
+    for bundle in request.ios_bundles:
+        try:
+            listing_ios = await app_store_listing(bundle, settings.default_country_list())
+        except Exception as exc:
+            listing_ios = None
+            warn(f"Official App Store listing read failed for {bundle}: {exc}")
+        if listing_ios:
+            app_store_listings.append((bundle, listing_ios["publisher"], listing_ios["seller_id"]))
+            if official_icon_url is None:  # no Play icon: the App Store icon is the reference instead
+                official_icon_url = listing_ios["icon"]
+    # Each store's own listings are what allowlisting compares that store's hits against
+    from app.services.allowlist import store_metadata
+    st.store_meta = store_metadata(play_listings, app_store_listings)
+    derived =[domain for domain, _ in st.derived_domains if domain not in request.official_domains]
     if derived:
         request = request.model_copy(update={
             "official_domains": [*request.official_domains, *derived],
@@ -438,7 +439,6 @@ async def _pipeline(scan_id: str, request: ScanRequest, redis_client: aioredis.R
         scan_id=scan_id,
         request=request,
         expanded_keywords=keywords,
-        official_permissions=official_permissions,
         official_icon_url=official_icon_url,
     )
 
@@ -517,16 +517,18 @@ async def _pipeline(scan_id: str, request: ScanRequest, redis_client: aioredis.R
     deduped = deduplicate(all_hits)
     st.hits = deduped
 
-    request = _learn_app_store_sellers(request, deduped)
     st.request = request
     deduped = await _stamp_play_developers(scan_id, request, deduped)
     st.hits = deduped
     request = await _verify_off_play_packages(scan_id, request, deduped)
     st.request = request
 
-    # Allowlist: drop the brand's own apps/domains/publishers before scoring.
-    # Official listings stay until after scoring (icon comparison needs them).
-    deduped, st.allowlisted = split_allowlisted(deduped, request)
+    # Allowlist: drop the brand's own apps/domains/publishers before scoring and before the threshold.
+    deduped, st.allowlisted = split_allowlisted(deduped, request, store_meta=st.store_meta)
+    # The brand's official listings are allowlisted too. Their icon is kept as the reference for the icon check.
+    official_icon = next((h.icon_url for h in deduped if h.is_official_match and h.icon_url), None)
+    deduped, official_dropped = drop_official(deduped)
+    st.allowlisted = st.allowlisted + official_dropped
     st.hits = deduped
     st.stage = "allowlisted"
 
@@ -541,8 +543,8 @@ async def _pipeline(scan_id: str, request: ScanRequest, redis_client: aioredis.R
 
     below_threshold: list[Hit] = []
     scored = await score_hits(
-        deduped, request, official_permissions=ctx.official_permissions, icon_cache=icon_cache,
-        reference_icon_url=ctx.official_icon_url,
+        deduped, request, icon_cache=icon_cache,
+        reference_icon_url=official_icon or ctx.official_icon_url,
         official_publishers=publishers, dropped=below_threshold,
     )
     await status_store.set_progress(redis_client, scan_id, 95)

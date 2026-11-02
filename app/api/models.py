@@ -70,13 +70,11 @@ class ScanRequest(BaseModel):
     ios_bundles: list[str] = Field(default_factory=list)
     official_domain: str | None = Field(None, max_length=253)
     # Allowlist — the brand's own assets, kept out of results (see services/allowlist.py)
-    allowlist_packages: list[str] = Field(default_factory=list)   # other legit app IDs, e.g. a business app
     official_publishers: list[str] = Field(default_factory=list)  # developer names on official stores
     official_domains: list[str] = Field(default_factory=list)     # other official registrable domains
-    # The brand's store accounts: Google Play developer ids and App Store seller ids (artistId). The store owns
-    # these ids, so every app an account publishes on that store is the brand's own (see services/allowlist.py).
+    # The brand's Google Play developer ids. The store owns these ids, so every app an account publishes on Play is
+    # the brand's own (see services/allowlist.py). App Store artist ids come from the App Store URL, not from here.
     play_developer_ids: list[str] = Field(default_factory=list)
-    app_store_seller_ids: list[str] = Field(default_factory=list)
     keywords: list[str] = Field(default_factory=list)
 
     # The body as the client sent it, before a confirmed brand was merged in. Set by the API and reported as the
@@ -127,8 +125,8 @@ class ScanRequest(BaseModel):
         import json
 
         data = self.model_dump(mode="json")
-        for key in ("keywords", "allowlist_packages", "official_publishers", "official_domains",
-                    "android_packages", "ios_bundles", "brand_aliases", "play_developer_ids", "app_store_seller_ids"):
+        for key in ("keywords", "official_publishers", "official_domains",
+                    "android_packages", "ios_bundles", "brand_aliases", "play_developer_ids"):
             data[key] = sorted({str(v).strip().lower() for v in data[key]})
         for key in ("brand_name", "official_domain"):
             if data[key]:
@@ -136,8 +134,8 @@ class ScanRequest(BaseModel):
         blob = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         return hashlib.sha256(blob.encode()).hexdigest()
 
-    @field_validator("allowlist_packages", "official_publishers", "official_domains", "android_packages", "ios_bundles",
-                     "brand_aliases", "play_developer_ids", "app_store_seller_ids")
+    @field_validator("official_publishers", "official_domains", "android_packages", "ios_bundles",
+                     "brand_aliases", "play_developer_ids")
     @classmethod
     def clean_allowlist(cls, v: list[str]) -> list[str]:
         if len(v) > 200:
@@ -172,15 +170,11 @@ class EvidenceRecord(BaseModel):
     """Pointers to captured evidence; paths are relative to the hit's evidence dir."""
     captured_at: datetime
     http_status: int | None = None
-    page_path: str | None = None
-    page_sha256: str | None = None
     # Where the page actually ended up after redirects, and each hop on the way (for takedown requests)
     final_url: str | None = None
     redirects: list[str] = []
     screenshot_path: str | None = None
     screenshot_sha256: str | None = None
-    icon_path: str | None = None
-    icon_sha256: str | None = None
     # What the captured page looks like: parked | blank | brand_bait | mentions_brand | neutral
     assessment: str | None = None
     # Why nothing was fetched on purpose, e.g. the link is a file
@@ -192,6 +186,9 @@ class EvidenceRecord(BaseModel):
 
 
 class Hit(BaseModel):
+    # Unknown fields are refused, so a removed field (permission_similarity) is not silently loaded
+    model_config = ConfigDict(extra="forbid")
+
     id: str
     type: HitType
     title: str | None = None
@@ -214,7 +211,6 @@ class Hit(BaseModel):
     reasons: list[str] = Field(default_factory=list)
     is_official_match: bool = False
     icon_similarity: float | None = None
-    permission_similarity: float | None = None
     evidence: EvidenceRecord | None = None
     discovered_at: datetime
 
@@ -267,6 +263,7 @@ class AllowlistedItem(BaseModel):
     app_name: str | None = None
     package_id: str | None = None
     publisher: str | None = None
+    developer_id: str | None = None
     source: str | None = None
     reason: str
 
@@ -297,7 +294,6 @@ class ScanContext(BaseModel):
     scan_id: str
     request: ScanRequest
     expanded_keywords: list[Keyword]
-    official_permissions: list[str] = Field(default_factory=list)
     # The brand's own icon from Google Play: the reference for icon comparison, even when the brand's listing is
     # allowlisted and so not among the hits
     official_icon_url: str | None = None

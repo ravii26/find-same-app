@@ -20,7 +20,7 @@ from app.api.models import (
     SourceMethod,
     SourceStatus,
 )
-from app.services.brand_match import brand_terms
+from app.services.brand_match import brand_terms, presence_any
 from app.sources.base import SourceAdapter, country_label, scan_countries, scraped_hit
 from app.utils.http_client import FetchError, fetch
 
@@ -40,6 +40,7 @@ class GetAppsAdapter(SourceAdapter):
 
     async def search(self, ctx: ScanContext) -> tuple[list[Hit], SourceStatus]:
         terms = brand_terms(ctx, kinds=("original", "package"), limit=4, variants=2)
+        brands = [ctx.request.brand_name, *ctx.request.brand_aliases]
 
         countries = scan_countries(ctx)
         hits: list[Hit] = []
@@ -67,6 +68,11 @@ class GetAppsAdapter(SourceAdapter):
                         pkg = item.get("packageName", "")
                         if not pkg:
                             continue
+                        publisher = item.get("publisherName") or item.get("developerName")
+                        # The search returns any app that matches the keyword ("WhatsApp" for "PhonePe"): keep only
+                        # apps that carry the brand, near misses included, the same test the scorer uses.
+                        if presence_any(brands, item.get("displayName"), pkg, publisher) is None:
+                            continue
                         listing_url = f"https://global.app.mi.com/apps/details?id={pkg}"
                         uid = hashlib.sha256(listing_url.encode()).hexdigest()[:32]
                         if uid in seen:
@@ -85,14 +91,13 @@ class GetAppsAdapter(SourceAdapter):
                             url=listing_url,
                             host_name="GetApps (Xiaomi)",
                             host_domain="global.app.mi.com",
-                            is_official_store=True,
                             hit_id=uid,
                             title=item.get("displayName"),
                             app_name=item.get("displayName"),
                             package_id=pkg,
                             # publisherName is the GetApps account that lists the app ("Aptoide" for apps GetApps
                             # re-hosts from Aptoide); developerName is only sometimes present
-                            publisher=item.get("publisherName") or item.get("developerName"),
+                            publisher=publisher,
                             icon_url=icon_url,
                         ))
 

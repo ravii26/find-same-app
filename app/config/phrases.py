@@ -11,10 +11,9 @@ from typing import Any
 import yaml
 
 _PATH = Path(__file__).resolve().parent.parent.parent / "config" / "phrases.yaml"
-_LISTS = ("lure_suffixes", "lure_words", "scam_words", "bait_words", "search_queries")
+_LISTS = ("lure_suffixes", "lure_words", "scam_words", "bait_words", "search_queries", "brand_suffixes", "brand_prefixes")
 
-# Localized extras added per country, so a request with many countries cannot flood the search.
-MAX_LOCALIZED_SUFFIXES = 12
+# Localized Bing query templates added per country, so a request with many countries cannot flood the search.
 MAX_LOCALIZED_QUERIES = 2
 
 
@@ -59,10 +58,14 @@ def _localized(key: str, countries: list[str], limit: int) -> list[str]:
     return out
 
 
-def lure_suffixes(countries: list[str]) -> list[str]:
-    """English suffixes first, then the localized ones of the given countries (the storefronts every scan searches)."""
-    base = list(_load()["packs"]["default"]["lure_suffixes"])
-    return base + [s for s in _localized("lure_suffixes", countries, MAX_LOCALIZED_SUFFIXES) if s not in base][:MAX_LOCALIZED_SUFFIXES]
+def default_words(key: str) -> list[str]:
+    """A word list of the default (English) pack, for matching that does not depend on the country."""
+    return list(_load()["packs"]["default"].get(key, []))
+
+
+def lure_suffixes() -> list[str]:
+    """The English lure suffixes. Lures are English only; localized packs do not add any."""
+    return list(_load()["packs"]["default"]["lure_suffixes"])
 
 
 def search_queries(countries_one: str) -> list[str]:

@@ -24,7 +24,7 @@ _DDG_URL = "https://html.duckduckgo.com/html/"
 class DuckDuckGoAdapter(SourceAdapter):
     name = "duckduckgo"
     method = SourceMethod.scrape
-    host_group = "web_search"
+    host_group = "search_engine"
 
     async def search(self, ctx: ScanContext) -> tuple[list[Hit], SourceStatus]:
         brand = ctx.request.brand_name

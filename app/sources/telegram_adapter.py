@@ -100,7 +100,7 @@ def _extract_apk_url(msg_node: object) -> str | None:
 class TelegramAdapter(SourceAdapter):
     name = "telegram"
     method = SourceMethod.scrape
-    host_group = "social"
+    host_group = "channel"
 
     async def search(self, ctx: ScanContext) -> tuple[list[Hit], SourceStatus]:
         brand = ctx.request.brand_name
@@ -251,11 +251,8 @@ class TelegramAdapter(SourceAdapter):
             # app_name = cleaned channel handle for scoring — WRatio against brand
             # scores much higher than raw message text (a sentence).
             # title carries the message preview for display.
-            # APK-distributing channels get host_group="apk_site" for the scoring bonus.
             channel_name = channel.replace("_", " ").replace("-", " ")
             apk_url = _extract_apk_url(msg)
-            is_apk_channel = "apk" in channel.lower() or "apk" in text.lower() or bool(apk_url)
-            host_group = "apk_site" if is_apk_channel else self.host_group
             hits.append(
                 scraped_hit(
                     self,
@@ -263,7 +260,7 @@ class TelegramAdapter(SourceAdapter):
                     url=msg_href,
                     host_name="Telegram",
                     host_domain="t.me",
-                    group=host_group,
+                    group=self.host_group,
                     hit_id=uid,
                     hit_type=HitType.channel_post,
                     app_name=channel_name,

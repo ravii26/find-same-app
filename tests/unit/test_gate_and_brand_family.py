@@ -11,11 +11,13 @@ from __future__ import annotations
 import datetime
 
 from app.api.models import Hit, HitType, HostInfo, ScanRequest
-from app.services.allowlist import split_allowlisted
+from app.services.allowlist import split_allowlisted, store_metadata
 from app.services.scoring import _gate_name_only, _score_one, min_relevance_for
 
 PHONEPE = ScanRequest(brand_name="PhonePe", android_packages=["com.phonepe.app"], official_domain="phonepe.com",
                       official_publishers=["PhonePe"], play_developer_ids=["PhonePe"])
+# The brand's own Play listing (what the scan reads for the Play package it was given)
+PHONEPE_META = store_metadata([("com.phonepe.app", "PhonePe", "PhonePe")])
 
 
 def _hit(**update) -> Hit:
@@ -82,25 +84,25 @@ def _indus(pkg: str, name: str, publisher: str = "PhonePe") -> Hit:
                 host=HostInfo(group="app_store", name="PhonePe Apps", domain="phonepeappstore.com"))
 
 
-def test_a_sibling_app_verified_on_play_is_allowlisted_on_other_stores():
-    hits = [_indus("com.phonepe.app.business", "PhonePe Business"),  # listed before its Play listing
-            _play("com.phonepe.app.business", "PhonePe Business UPI")]
-    remaining, allowed = split_allowlisted(hits, PHONEPE)
-    assert remaining == []
-    assert {a.source for a in allowed} == {"PhonePe Apps", "Google Play"}
+def test_a_sibling_app_verified_on_play_is_allowlisted_on_play_only():
+    indus = _indus("com.phonepe.app.business", "PhonePe Business")  # listed before its Play listing
+    hits = [indus, _play("com.phonepe.app.business", "PhonePe Business UPI")]
+    remaining, allowed = split_allowlisted(hits, PHONEPE, store_meta=PHONEPE_META)
+    assert remaining == [indus]  # a copy on another store is scored, not cleared
+    assert [a.source for a in allowed] == ["Google Play"]
 
 
 def test_the_same_package_under_another_publisher_stays_a_finding():
     hits = [_play("com.phonepe.app.business", "PhonePe Business UPI"),
             _indus("com.phonepe.app.business", "PhonePe Business", publisher="Totally Legit Apps")]
-    remaining, _ = split_allowlisted(hits, PHONEPE)
+    remaining, _ = split_allowlisted(hits, PHONEPE, store_meta=PHONEPE_META)
     assert [h.publisher for h in remaining] == ["Totally Legit Apps"]
 
 
 def test_a_package_from_someone_elses_play_account_is_not_borrowed():
     hits = [_play("com.phonepe.app.business", "PhonePe Business UPI", developer_id="SomeoneElse"),
             _indus("com.phonepe.app.business", "PhonePe Business")]
-    remaining, _ = split_allowlisted(hits, PHONEPE)
+    remaining, _ = split_allowlisted(hits, PHONEPE, store_meta=PHONEPE_META)
     assert len(remaining) == 2
 
 
@@ -144,16 +146,16 @@ def test_a_copy_with_another_id_is_not_capped():
 def test_a_link_to_the_brands_own_play_listing_is_allowlisted():
     link = _hit(type=HitType.web_page, app_name="PhonePe UPI Payments - Apps on Google Play",
                 url="https://play.google.com/store/apps/details?id=com.phonepe.app&hl=en-CA",
-                host=HostInfo(group="web_search", name="Bing", domain="bing.com"))
-    remaining, allowed = split_allowlisted([link], PHONEPE)
+                host=HostInfo(group="search_engine", name="Bing", domain="bing.com"))
+    remaining, allowed = split_allowlisted([link], PHONEPE, store_meta=PHONEPE_META)
     assert remaining == [] and "own Google Play listing" in allowed[0].reason
 
 
 def test_a_link_to_someone_elses_play_listing_stays():
     link = _hit(type=HitType.web_page, app_name="PhonePay - Apps on Google Play",
                 url="https://play.google.com/store/apps/details?id=com.phonepay.android",
-                host=HostInfo(group="web_search", name="Bing", domain="bing.com"))
-    remaining, _ = split_allowlisted([link], PHONEPE)
+                host=HostInfo(group="search_engine", name="Bing", domain="bing.com"))
+    remaining, _ = split_allowlisted([link], PHONEPE, store_meta=PHONEPE_META)
     assert len(remaining) == 1
 
 

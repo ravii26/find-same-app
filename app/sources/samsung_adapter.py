@@ -13,19 +13,21 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import json
 import logging
 import xml.etree.ElementTree as ET
 from urllib.parse import urlencode
 
 from app.api.models import FoundVia, Hit, HitType, HostInfo, ScanContext, SourceMethod, SourceStatus
-from app.services.brand_match import brand_terms
+from app.services.brand_match import brand_terms, presence_any
 from app.sources.base import SourceAdapter, scrape_status
-from app.utils.http_client import BlockedError, FetchError, decode_response, fetch
+from app.utils.http_client import BlockedError, FetchError, decode_response, fetch, throttle
 
 log = logging.getLogger(__name__)
 
 _SEARCH = "https://galaxystore.samsung.com/storeserver/search"
 _DETAIL = "https://galaxystore.samsung.com/detail/{guid}"
+_DETAIL_API = "https://galaxystore.samsung.com/api/detail/{guid}"
 _PER_TERM = 20
 
 
@@ -63,6 +65,7 @@ class SamsungAdapter(SourceAdapter):
 
     async def search(self, ctx: ScanContext) -> tuple[list[Hit], SourceStatus]:
         terms = brand_terms(ctx, kinds=("original", "package"), limit=3, variants=2)
+        brands = [ctx.request.brand_name, *ctx.request.brand_aliases]
         if not terms:
             return [], SourceStatus(name=self.name, method=self.method, status="skipped",
                                     error="no brand-relevant keywords")
@@ -87,6 +90,9 @@ class SamsungAdapter(SourceAdapter):
             for app in apps:
                 if app["package"] in seen:
                     continue
+                # The search returns any app matching the keyword: keep only the brand, near misses included
+                if presence_any(brands, app["name"], app["package"], app["publisher"]) is None:
+                    continue
                 seen.add(app["package"])
                 detail = _DETAIL.format(guid=app["package"])
                 hits.append(Hit(
@@ -105,4 +111,30 @@ class SamsungAdapter(SourceAdapter):
                     discovered_at=datetime.datetime.now(datetime.timezone.utc),
                 ))
 
+        # The app's own detail call (what the store page loads) gives the version, seller and description.
+        hits = [await self._with_detail(h) for h in hits[: self.max_results]] + hits[self.max_results :]
+
         return hits, scrape_status(self.name, self.method, hits, errors=errors, blocked=blocked)
+
+    @staticmethod
+    async def _with_detail(hit: Hit) -> Hit:
+        """The hit with version, seller and description from the detail call. A failed call keeps the search fields."""
+        package = hit.package_id or ""
+        if not package:
+            return hit
+        url = _DETAIL_API.format(guid=package)
+        try:
+            await throttle(url)
+            detail = json.loads(decode_response(await fetch(url, headers={"Accept": "application/json"})))
+        except (BlockedError, FetchError, ValueError) as exc:
+            log.info("samsung: detail not read for %s: %s", package, exc)
+            return hit
+        main = detail.get("DetailMain") or {}
+        update: dict[str, str] = {}
+        if main.get("contentBinaryVersion"):
+            update["version"] = main["contentBinaryVersion"]
+        if not hit.publisher and (main.get("sellerName") or "").strip():
+            update["publisher"] = main["sellerName"].strip()
+        if (main.get("contentDescription") or "").strip():
+            update["description"] = main["contentDescription"].strip()[:1000]  # same cap as the other stores
+        return hit.model_copy(update=update)

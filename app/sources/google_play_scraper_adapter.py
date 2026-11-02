@@ -184,7 +184,6 @@ class GooglePlayScraperAdapter(SourceAdapter):
                 url=url,
                 host_name="Google Play",
                 host_domain="play.google.com",
-                is_official_store=True,
                 hit_id=uid,
                 title=r.get("title"),
                 app_name=r.get("title"),

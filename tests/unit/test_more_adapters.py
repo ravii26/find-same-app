@@ -1,8 +1,7 @@
-"""Unit tests for Telegram, Aptoide, and APKMirror adapters."""
+"""Unit tests for Telegram and APKMirror adapters."""
 
 from __future__ import annotations
 
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -114,30 +113,6 @@ async def test_telegram_404_channel_skipped():
 
     assert hits == []
 
-
-
-@pytest.mark.asyncio
-async def test_aptoide_no_listing_url_skipped():
-    from app.sources.aptoide_adapter import AptoideAdapter
-
-    data = {
-        "datalist": {
-            "list": [{
-                "package": "",
-                "name": "Unknown",
-                "urls": {},
-                "malware": {"rank": "TRUSTED"},
-            }]
-        }
-    }
-    resp = MagicMock()
-    resp.content = json.dumps(data).encode()
-
-    with patch("app.sources.aptoide_adapter.fetch", new=AsyncMock(return_value=resp)):
-        adapter = AptoideAdapter()
-        hits, _ = await adapter.search(_make_ctx())
-
-    assert hits == []
 
 
 # ── APKMirror adapter (parser) ────────────────────────────────────────────────

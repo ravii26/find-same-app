@@ -65,7 +65,7 @@ def _extract_url(href: str, cite_text: str) -> str | None:
 class BingAdapter(SourceAdapter):
     name = "bing"
     method = SourceMethod.scrape
-    host_group = "web_search"
+    host_group = "search_engine"
 
     def _make_host(self, real_url: str) -> HostInfo:
         """Host recorded on each hit. Subclasses override to record the real host."""
